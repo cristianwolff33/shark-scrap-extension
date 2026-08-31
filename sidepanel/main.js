@@ -41,6 +41,21 @@ function toast(message, kind = "ok") {
   toast._t = setTimeout(() => { box.hidden = true; }, 3500);
 }
 
+function normalizeImageDomainTemplate(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  if (raw.includes("[sku]") || raw.includes("[rozszerzenie]")) return raw;
+  const withProtocol = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
+  const clean = withProtocol.replace(/\/+$/, "");
+  return `${clean}/produkty/[sku].[rozszerzenie]`;
+}
+
+function setExportButtonsDisabled(disabled) {
+  for (const id of ["export-excel-btn", "export-csv-btn", "export-json-preview-btn", "export-images-btn"]) {
+    el(id).disabled = disabled;
+  }
+}
+
 // --- komunikacja z aktywną kartą -------------------------------------------------
 
 async function getActiveTab() {
@@ -151,8 +166,8 @@ function readFormIntoConfig() {
     experimental: pMode === "load_more" || pMode === "infinite_scroll",
   };
 
-  c.image_links.public_base_url = el("image-base-url-input").value.trim();
-  c.image_links.brand_segment = el("image-brand-input").value.trim();
+  c.image_links.public_base_url = normalizeImageDomainTemplate(el("image-base-url-input").value);
+  c.image_links.brand_segment = "";
   c.notes = el("notes-textarea").value;
   return c;
 }
@@ -324,6 +339,7 @@ async function onScanCatalog() {
   renderWarnings([]);
 
   el("scan-btn").disabled = true;
+  setExportButtonsDisabled(true);
   el("stop-scan-btn").hidden = false;
   el("scan-progress-wrap").hidden = false;
   el("scan-progress-fill").style.width = "0%";
@@ -379,6 +395,7 @@ async function onScanCatalog() {
   } finally {
     state.scanning = false;
     el("scan-btn").disabled = false;
+    setExportButtonsDisabled(false);
     el("stop-scan-btn").hidden = true;
   }
 }
@@ -446,16 +463,21 @@ async function writeOutput(filename, blob) {
   }
 }
 
-function requireScanResults() {
+async function ensureScanResults() {
+  await onApiKeyInputChange();
+  if (state.scanProducts.length > 0) return true;
+  if (state.scanning) return false;
+  toast("Skanuję stronę automatycznie...");
+  await onScanCatalog();
   if (state.scanProducts.length === 0) {
-    toast("Brak wyników — najpierw kliknij „Skanuj sklep”", "err");
+    toast("Nie udało się zebrać produktów z tej strony", "err");
     return false;
   }
   return true;
 }
 
 async function onExportExcel() {
-  if (!requireScanResults()) return;
+  if (!(await ensureScanResults())) return;
   readFormIntoConfig();
   try {
     const blob = productsToXlsxBlob(state.scanProducts, PRODUCT_FIELDS);
@@ -467,7 +489,7 @@ async function onExportExcel() {
 }
 
 async function onExportCsv() {
-  if (!requireScanResults()) return;
+  if (!(await ensureScanResults())) return;
   readFormIntoConfig();
   try {
     const csv = productsToCsv(state.scanProducts, PRODUCT_FIELDS);
@@ -480,7 +502,7 @@ async function onExportCsv() {
 }
 
 async function onExportJsonPreview() {
-  if (!requireScanResults()) return;
+  if (!(await ensureScanResults())) return;
   readFormIntoConfig();
   try {
     const payload = {
@@ -513,7 +535,7 @@ const IMAGE_EXPORT_CAP = 500;
 const IMAGE_FETCH_DELAY_MS = 120; // uprzejmość wobec CDN sklepu
 
 async function onExportImages() {
-  if (!requireScanResults()) return;
+  if (!(await ensureScanResults())) return;
   readFormIntoConfig();
   const progressEl = el("images-export-progress");
   const btn = el("export-images-btn");
@@ -619,8 +641,9 @@ function refreshAiStatusUi() {
   if (state.openai.apiKey) {
     label.textContent = `Klucz zapisany, model: ${state.openai.model || "gpt-5.6-luna"}`;
     checkbox.disabled = false;
+    checkbox.checked = true;
   } else {
-    label.textContent = "Brak klucza API - otwórz ustawienia";
+    label.textContent = "Brak klucza API - AI jest wyłączone";
     checkbox.disabled = true;
     checkbox.checked = false;
   }
@@ -631,6 +654,14 @@ async function loadAiSettingsIntoUi() {
   state.openai = await loadOpenAiSettings();
   el("openai-api-key-input").value = state.openai.apiKey || "";
   el("openai-model-input").value = state.openai.model || "";
+  refreshAiStatusUi();
+}
+
+async function onApiKeyInputChange() {
+  const apiKey = el("openai-api-key-input").value.trim();
+  const model = el("openai-model-input").value.trim();
+  state.openai = { apiKey, model };
+  await saveOpenAiSettings(state.openai);
   refreshAiStatusUi();
 }
 
@@ -754,6 +785,7 @@ async function init() {
   await loadAiSettingsIntoUi();
   el("save-ai-settings-btn").addEventListener("click", onSaveAiSettings);
   el("clear-ai-settings-btn").addEventListener("click", onClearAiSettings);
+  el("openai-api-key-input").addEventListener("change", onApiKeyInputChange);
 
   el("scan-btn").addEventListener("click", onScanCatalog);
   el("stop-scan-btn").addEventListener("click", onStopScan);
@@ -781,7 +813,7 @@ async function init() {
 
   chrome.runtime.onMessage.addListener(onPickerMessage);
 
-  onBridgeCheck();
+  // Bridge jest trybem developerskim; prosty panel działa bez niego.
 }
 
 init().catch((err) => {

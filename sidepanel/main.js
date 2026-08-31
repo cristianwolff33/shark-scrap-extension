@@ -1,7 +1,7 @@
 import { PRODUCT_FIELDS, createDefaultConfig, slugifyDomain } from "../lib/schema.js";
 import { loadConfig, saveConfig, loadBridgeSettings, saveBridgeSettings, loadOpenAiSettings, saveOpenAiSettings } from "../lib/storage.js";
 import { createBridgeClient } from "../lib/bridge-client.js";
-import { downloadConfig, productsToCsv, productsToExcelHtml } from "../lib/export.js";
+import { downloadConfig, productsToCsv, productsToXlsxBlob } from "../lib/export.js";
 import { formatScanProgress } from "../lib/crawler.js";
 import * as fsdir from "../lib/fsdir.js";
 
@@ -315,6 +315,7 @@ function renderWarnings(warnings) {
 }
 
 async function onScanCatalog() {
+  readFormIntoConfig();
   state.scanning = true;
   state.scanProducts = [];
   el("results-tbody").innerHTML = "";
@@ -455,11 +456,11 @@ function requireScanResults() {
 
 async function onExportExcel() {
   if (!requireScanResults()) return;
+  readFormIntoConfig();
   try {
-    const html = productsToExcelHtml(state.scanProducts, PRODUCT_FIELDS);
-    const blob = new Blob(["﻿" + html], { type: "application/vnd.ms-excel" });
-    await writeOutput(`${slugifyDomain(state.config.domain)}.xls`, blob);
-    toast("Zapisano Excel (.xls)");
+    const blob = productsToXlsxBlob(state.scanProducts, PRODUCT_FIELDS);
+    await writeOutput(`${slugifyDomain(state.config.domain)}.xlsx`, blob);
+    toast("Zapisano XLSX");
   } catch (err) {
     toastError(err);
   }
@@ -467,6 +468,7 @@ async function onExportExcel() {
 
 async function onExportCsv() {
   if (!requireScanResults()) return;
+  readFormIntoConfig();
   try {
     const csv = productsToCsv(state.scanProducts, PRODUCT_FIELDS);
     const blob = new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8" });
@@ -479,6 +481,7 @@ async function onExportCsv() {
 
 async function onExportJsonPreview() {
   if (!requireScanResults()) return;
+  readFormIntoConfig();
   try {
     const payload = {
       domain: state.config.domain,
@@ -511,6 +514,7 @@ const IMAGE_FETCH_DELAY_MS = 120; // uprzejmość wobec CDN sklepu
 
 async function onExportImages() {
   if (!requireScanResults()) return;
+  readFormIntoConfig();
   const progressEl = el("images-export-progress");
   const btn = el("export-images-btn");
   progressEl.hidden = false;
@@ -613,10 +617,10 @@ function refreshAiStatusUi() {
   const label = el("ai-status-label");
   const checkbox = el("use-ai-checkbox");
   if (state.openai.apiKey) {
-    label.textContent = `AI: klucz zapisany (model: ${state.openai.model || "gpt-5.6-luna (domyślny)"})`;
+    label.textContent = `Klucz zapisany, model: ${state.openai.model || "gpt-5.6-luna"}`;
     checkbox.disabled = false;
   } else {
-    label.textContent = "AI: brak klucza API — patrz „Ustawienia AI” niżej";
+    label.textContent = "Brak klucza API - otwórz ustawienia";
     checkbox.disabled = true;
     checkbox.checked = false;
   }
@@ -634,13 +638,13 @@ async function onSaveAiSettings() {
   const apiKey = el("openai-api-key-input").value.trim();
   const model = el("openai-model-input").value.trim();
   if (!apiKey) {
-    toast("Podaj klucz API (sk-...)", "err");
+    toast("Podaj klucz API Codex / OpenAI (sk-...)", "err");
     return;
   }
   state.openai = { apiKey, model };
   await saveOpenAiSettings(state.openai);
   refreshAiStatusUi();
-  toast("Zapisano ustawienia AI");
+  toast("Zapisano klucz API");
 }
 
 async function onClearAiSettings() {

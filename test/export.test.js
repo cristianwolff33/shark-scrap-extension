@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { productsToPlainRows, productsToCsv, productsToExcelHtml } from "../lib/export.js";
+import { productsToPlainRows, productsToCsv, productsToExcelHtml, productsToXlsxBlob } from "../lib/export.js";
 
 const FIELD_ORDER = ["product_name", "sku", "price"];
 
@@ -80,4 +80,16 @@ test("productsToExcelHtml escapuje HTML w wartościach (bez wstrzyknięcia znacz
   assert.match(html, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
   assert.match(html, /&amp;/);
   assert.match(html, /&quot;quoted&quot;/);
+});
+
+test("productsToXlsxBlob generuje prawdziwy plik XLSX jako ZIP z arkuszem", async () => {
+  const blob = productsToXlsxBlob(SAMPLE_PRODUCTS, FIELD_ORDER);
+  assert.equal(blob.type, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  assert.equal(bytes[0], 0x50); // P
+  assert.equal(bytes[1], 0x4b); // K
+  const text = new TextDecoder().decode(bytes);
+  assert.match(text, /\[Content_Types\]\.xml/);
+  assert.match(text, /xl\/worksheets\/sheet1\.xml/);
+  assert.match(text, /Krzesło biurowe/);
 });

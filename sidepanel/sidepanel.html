@@ -2,69 +2,73 @@
 <html lang="pl">
 <head>
   <meta charset="utf-8" />
-  <title>Scraper Client — konfigurator</title>
+  <title>Scraper Client</title>
   <link rel="stylesheet" href="sidepanel.css" />
 </head>
 <body>
   <header class="topbar">
-    <div>
-      <div class="domain" id="domain-label">—</div>
-      <div class="subtle" id="start-url-label">—</div>
+    <div class="brand-lockup">
+      <div class="brand-mark">SC</div>
+      <div>
+        <div class="app-name">Scraper Client</div>
+        <div class="domain" id="domain-label">-</div>
+      </div>
     </div>
-    <div class="bridge-status" id="bridge-status" title="Status połączenia z lokalnym bridge">
-      <span class="dot" id="bridge-dot"></span>
-      <span id="bridge-status-text">bridge: nieznany</span>
-    </div>
+    <button id="stop-scan-btn" class="btn danger compact" hidden>Stop</button>
   </header>
 
   <main>
-    <section class="card hero">
-      <div class="card-title">Skanuj sklep automatycznie</div>
-      <div class="subtle">
-        Wejdź na stronę kategorii/listy produktów i kliknij — rozszerzenie samo wykryje pola,
-        listę produktów i paginację, po czym przejdzie przez cały katalog. Z karty produktu
-        zeskanuje sam produkt.
+    <section class="hero-panel">
+      <div class="scan-orb" aria-hidden="true"></div>
+      <div class="hero-copy">
+        <h1>Ultimate-style scraper</h1>
+        <p id="start-url-label">-</p>
       </div>
-      <div class="btn-row hero-actions">
-        <button id="scan-btn" class="btn primary big">🔍 Skanuj sklep</button>
-        <button id="stop-scan-btn" class="btn danger" hidden>■ Stop</button>
+
+      <div class="form-shell">
+        <label class="field-row">
+          <span>Domena do linków zdjęć</span>
+          <input id="image-base-url-input" type="text" placeholder="https://twojadomena.pl/images/" />
+        </label>
+        <label class="field-row slim">
+          <span>Segment / marka</span>
+          <input id="image-brand-input" type="text" placeholder="np. rezaw" />
+        </label>
       </div>
-      <label class="checkbox-inline ai-toggle">
+
+      <label class="ai-strip">
         <input type="checkbox" id="use-ai-checkbox" disabled />
-        Użyj AI (OpenAI) dla brakujących pól
+        <span>
+          <strong>Codex AI</strong>
+          <small id="ai-status-label">Brak klucza API - otwórz ustawienia</small>
+        </span>
       </label>
-      <div id="ai-status-label" class="subtle">AI: brak klucza API — patrz „Ustawienia AI” niżej</div>
+
+      <div class="primary-actions" aria-label="Główne akcje">
+        <button id="scan-btn" class="btn primary action-main">Skanuj</button>
+        <button id="export-excel-btn" class="btn neon">XLSX</button>
+        <button id="export-csv-btn" class="btn neon">CSV</button>
+        <button id="export-json-preview-btn" class="btn neon">JSON</button>
+        <button id="export-images-btn" class="btn neon">Images</button>
+      </div>
+
       <div id="scan-progress-wrap" class="progress-wrap" hidden>
         <div class="progress-bar"><div id="scan-progress-fill" class="progress-fill"></div></div>
-        <div id="scan-progress-text" class="subtle">—</div>
+        <div id="scan-progress-text" class="subtle">-</div>
       </div>
       <ul id="scan-warnings" class="warnings" hidden></ul>
+      <div id="images-export-progress" class="subtle" hidden></div>
     </section>
 
-    <details class="card details-card" id="ai-settings-card">
-      <summary>⚙️ Ustawienia AI (OpenAI) — opcjonalne</summary>
-      <div class="subtle">
-        Klucz zostaje TYLKO w tej przeglądarce (chrome.storage.local) — zapytania do OpenAI
-        lecą bezpośrednio z wtyczki, bez żadnego pośredniczącego serwera. Bez klucza wszystko
-        inne (skanowanie, eksport) działa normalnie — AI to tylko dodatkowe uzupełnianie pól,
-        których nic innego nie wykryło.
+    <section class="results-panel" id="results-card" hidden>
+      <div class="panel-head">
+        <div>
+          <div class="eyebrow">Wyniki</div>
+          <h2>Produkty <span id="results-count" class="badge count">0</span></h2>
+        </div>
+        <button id="change-folder-btn" class="folder-btn">Folder</button>
       </div>
-      <label class="field-row">
-        <span>Klucz API (sk-...)</span>
-        <input id="openai-api-key-input" type="password" placeholder="sk-..." autocomplete="off" />
-      </label>
-      <label class="field-row">
-        <span>Model (opcjonalnie)</span>
-        <input id="openai-model-input" type="text" placeholder="gpt-5.6-luna (domyślny)" />
-      </label>
-      <div class="btn-row">
-        <button id="save-ai-settings-btn" class="btn primary">Zapisz</button>
-        <button id="clear-ai-settings-btn" class="btn">Usuń klucz</button>
-      </div>
-    </details>
-
-    <section class="card" id="results-card" hidden>
-      <div class="card-title">Wyniki skanu <span id="results-count" class="badge count">0</span></div>
+      <div class="subtle" id="output-folder-label">Folder wyjściowy: nie wybrano</div>
       <div class="table-wrap">
         <table class="results-table">
           <thead>
@@ -80,148 +84,132 @@
           <tbody id="results-tbody"></tbody>
         </table>
       </div>
-      <div class="output-folder-row">
-        <span class="subtle" id="output-folder-label">Folder wyjściowy: nie wybrano</span>
-        <button id="change-folder-btn" class="btn small">Zmień folder</button>
-      </div>
-      <div class="btn-row export-grid">
-        <button id="export-excel-btn" class="btn primary">📊 Excel</button>
-        <button id="export-csv-btn" class="btn primary">📄 CSV</button>
-        <button id="export-json-preview-btn" class="btn primary">🔤 JSON</button>
-        <button id="export-images-btn" class="btn primary">🖼️ Zdjęcia</button>
-      </div>
-      <div id="images-export-progress" class="subtle" hidden></div>
-      <div class="subtle">
-        Klik na dowolny przycisk = od razu plik/zdjęcia w wybranym folderze, bez terminala i
-        bez Pythona. To surowe dane z tabeli (bez normalizacji SKU/EAN/cen) — jeśli zależy Ci
-        na kanonicznym, znormalizowanym eksporcie przez sam framework, użyj sekcji „Eksport
-        pełny (tryb zaawansowany)” niżej.
-      </div>
     </section>
 
-    <details class="card details-card">
-      <summary>Szczegóły i ręczna korekta</summary>
-
-      <div class="card-subtitle">1. Detekcja danych produktu (bieżąca strona)</div>
-      <button id="detect-btn" class="btn">Detect Product Data</button>
-      <div id="fields-list" class="fields-list"></div>
-
-      <div class="card-subtitle">2. Tryb adaptera i źródło</div>
-      <label class="field-row">
-        <span>Tryb</span>
-        <select id="mode-select">
-          <option value="requests">requests</option>
-          <option value="playwright">playwright</option>
-          <option value="api">api</option>
-          <option value="xml">xml</option>
-          <option value="csv">csv</option>
-        </select>
-      </label>
-      <label class="field-row">
-        <span>Nazwa adaptera (--name)</span>
-        <input id="source-name-input" type="text" placeholder="np. moj_sklep" />
-      </label>
-      <label class="field-row">
-        <span>Base URL</span>
-        <input id="base-url-input" type="text" placeholder="https://sklep.pl" />
-      </label>
-      <label class="field-row">
-        <span>Start URL</span>
-        <input id="start-url-input" type="text" placeholder="https://sklep.pl/kategoria" />
-      </label>
-
-      <div class="card-subtitle">3. Lista produktów (strona kategorii)</div>
-      <button id="detect-listing-btn" class="btn">Wykryj listę produktów</button>
-      <div id="listing-summary" class="subtle"></div>
-      <label class="field-row">
-        <span>Selektor karty</span>
-        <input id="item-selector-input" type="text" />
-      </label>
-      <label class="field-row">
-        <span>Selektor URL produktu</span>
-        <input id="url-selector-input" type="text" />
-      </label>
-      <label class="field-row">
-        <span>Atrybut URL</span>
-        <input id="url-attr-input" type="text" value="href" />
-      </label>
-
-      <div class="card-subtitle">Paginacja <span class="badge experimental">experimental: load more / infinite scroll</span></div>
-      <label class="field-row">
-        <span>Tryb</span>
-        <select id="pagination-mode-select">
-          <option value="none">brak</option>
-          <option value="next_link">next link</option>
-          <option value="load_more">load more</option>
-          <option value="infinite_scroll">infinite scroll</option>
-        </select>
-      </label>
-      <label class="field-row">
-        <span>Selektor "next"</span>
-        <input id="next-selector-input" type="text" />
-      </label>
-      <label class="field-row">
-        <span>Selektor "load more"</span>
-        <input id="load-more-selector-input" type="text" />
-      </label>
-      <label class="field-row">
-        <span>Max stron</span>
-        <input id="max-pages-input" type="number" value="20" min="1" max="500" />
-      </label>
-
-      <div class="card-subtitle">4. Linki do zdjęć (image_links.py)</div>
-      <label class="field-row">
-        <span>Domena zdjęć (wzorzec)</span>
-        <input id="image-base-url-input" type="text" placeholder="https://mojadomena.pl/produkty/[marka albo kategoria]/[sku].[rozszerzenie]" />
-      </label>
-      <label class="field-row">
-        <span>Marka / segment</span>
-        <input id="image-brand-input" type="text" />
-      </label>
-
-      <div class="card-subtitle">5. Uwagi</div>
-      <textarea id="notes-textarea" rows="3" placeholder="Dodatkowe zasady dla adaptera..."></textarea>
-
-      <div class="card-subtitle">Zapis lokalny</div>
-      <div class="btn-row">
-        <button id="save-config-btn" class="btn">Zapisz (chrome.storage)</button>
-        <button id="export-json-btn" class="btn">Eksportuj konfigurację JSON</button>
+    <details class="settings-panel" id="ai-settings-card">
+      <summary>Ustawienia wtyczki</summary>
+      <div class="settings-grid">
+        <label class="field-row">
+          <span>Klucz API Codex / OpenAI</span>
+          <input id="openai-api-key-input" type="password" placeholder="sk-..." autocomplete="off" />
+        </label>
+        <label class="field-row">
+          <span>Model</span>
+          <input id="openai-model-input" type="text" placeholder="gpt-5.6-luna" />
+        </label>
+        <div class="settings-actions">
+          <button id="save-ai-settings-btn" class="btn neon">Zapisz klucz</button>
+          <button id="clear-ai-settings-btn" class="btn ghost">Usuń</button>
+        </div>
       </div>
     </details>
 
-    <section class="card actions">
-      <div class="card-title">Eksport pełny (tryb zaawansowany) — CSV / Excel / zdjęcia przez framework</div>
-      <div class="subtle">
-        Wymaga uruchomionego bridge'a (Python, terminal — patrz docs/EXTENSION_BRIDGE.md).
-        Daje kanoniczne, znormalizowane dane (SKU/EAN/ceny wg ProductNormalizer) i zdjęcia z
-        poprawnymi publicznymi linkami (image_links.py) — nie ma osobnego przełącznika, lecą
-        automatycznie razem z uruchomieniem. Jeśli tego nie potrzebujesz, wystarczy sekcja
-        „Wyniki skanu” wyżej — działa bez tego wszystkiego.
-      </div>
-      <label class="field-row">
-        <span>Bridge URL</span>
-        <input id="bridge-url-input" type="text" value="http://127.0.0.1:8765" />
-      </label>
-      <div class="btn-row">
-        <button id="bridge-check-btn" class="btn">Sprawdź połączenie</button>
-        <button id="create-project-btn" class="btn">Utwórz / zaktualizuj projekt</button>
-      </div>
-      <div class="btn-row">
-        <button id="push-config-btn" class="btn">Wyślij konfigurację</button>
-        <button id="generate-adapter-btn" class="btn">Wygeneruj adapter</button>
-      </div>
-      <div class="btn-row">
-        <label class="checkbox-inline"><input type="checkbox" id="export-csv" checked /> csv</label>
-        <label class="checkbox-inline"><input type="checkbox" id="export-excel" checked /> excel (xlsx)</label>
-        <button id="run-btn" class="btn primary">Uruchom scraper</button>
-      </div>
-      <div class="btn-row">
-        <button id="status-btn" class="btn">Status</button>
-        <button id="outputs-btn" class="btn">Pokaż outputy</button>
-      </div>
-      <div class="subtle" id="project-id-label"></div>
-      <pre id="log-output" class="log"></pre>
-    </section>
+    <details class="advanced-panel">
+      <summary>Zaawansowane</summary>
+
+      <section class="card">
+        <div class="card-title">Ręczna korekta pól</div>
+        <button id="detect-btn" class="btn ghost">Wykryj dane produktu</button>
+        <div id="fields-list" class="fields-list"></div>
+
+        <label class="field-row">
+          <span>Tryb adaptera</span>
+          <select id="mode-select">
+            <option value="requests">requests</option>
+            <option value="playwright">playwright</option>
+            <option value="api">api</option>
+            <option value="xml">xml</option>
+            <option value="csv">csv</option>
+          </select>
+        </label>
+        <label class="field-row">
+          <span>Nazwa adaptera</span>
+          <input id="source-name-input" type="text" placeholder="np. moj_sklep" />
+        </label>
+        <label class="field-row">
+          <span>Base URL</span>
+          <input id="base-url-input" type="text" placeholder="https://sklep.pl" />
+        </label>
+        <label class="field-row">
+          <span>Start URL</span>
+          <input id="start-url-input" type="text" placeholder="https://sklep.pl/kategoria" />
+        </label>
+
+        <button id="detect-listing-btn" class="btn ghost">Wykryj listę</button>
+        <div id="listing-summary" class="subtle"></div>
+        <label class="field-row">
+          <span>Selektor karty</span>
+          <input id="item-selector-input" type="text" />
+        </label>
+        <label class="field-row">
+          <span>Selektor URL produktu</span>
+          <input id="url-selector-input" type="text" />
+        </label>
+        <label class="field-row">
+          <span>Atrybut URL</span>
+          <input id="url-attr-input" type="text" value="href" />
+        </label>
+
+        <label class="field-row">
+          <span>Paginacja</span>
+          <select id="pagination-mode-select">
+            <option value="none">brak</option>
+            <option value="next_link">next link</option>
+            <option value="load_more">load more</option>
+            <option value="infinite_scroll">infinite scroll</option>
+          </select>
+        </label>
+        <label class="field-row">
+          <span>Selektor next</span>
+          <input id="next-selector-input" type="text" />
+        </label>
+        <label class="field-row">
+          <span>Selektor load more</span>
+          <input id="load-more-selector-input" type="text" />
+        </label>
+        <label class="field-row">
+          <span>Max stron</span>
+          <input id="max-pages-input" type="number" value="20" min="1" max="500" />
+        </label>
+
+        <label class="field-row">
+          <span>Uwagi</span>
+          <textarea id="notes-textarea" rows="3" placeholder="Dodatkowe zasady dla adaptera..."></textarea>
+        </label>
+
+        <div class="btn-row">
+          <button id="save-config-btn" class="btn ghost">Zapisz config</button>
+          <button id="export-json-btn" class="btn ghost">Eksportuj config JSON</button>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-title">Bridge</div>
+        <div class="bridge-status" id="bridge-status" title="Status połączenia z lokalnym bridge">
+          <span class="dot" id="bridge-dot"></span>
+          <span id="bridge-status-text">bridge: nieznany</span>
+        </div>
+        <label class="field-row">
+          <span>Bridge URL</span>
+          <input id="bridge-url-input" type="text" value="http://127.0.0.1:8765" />
+        </label>
+        <div class="btn-row">
+          <button id="bridge-check-btn" class="btn ghost">Sprawdź</button>
+          <button id="create-project-btn" class="btn ghost">Projekt</button>
+          <button id="push-config-btn" class="btn ghost">Wyślij</button>
+          <button id="generate-adapter-btn" class="btn ghost">Adapter</button>
+        </div>
+        <div class="btn-row">
+          <label class="checkbox-inline"><input type="checkbox" id="export-csv" checked /> csv</label>
+          <label class="checkbox-inline"><input type="checkbox" id="export-excel" checked /> xlsx</label>
+          <button id="run-btn" class="btn ghost">Uruchom scraper</button>
+          <button id="status-btn" class="btn ghost">Status</button>
+          <button id="outputs-btn" class="btn ghost">Outputy</button>
+        </div>
+        <div class="subtle" id="project-id-label"></div>
+        <pre id="log-output" class="log"></pre>
+      </section>
+    </details>
   </main>
 
   <div id="toast" class="toast" hidden></div>

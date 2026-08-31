@@ -1,6 +1,16 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { productsToPlainRows, productsToCsv, productsToExcelHtml, productsToXlsxBlob } from "../lib/export.js";
+import {
+  headersForRows,
+  normalizeImageTemplate,
+  productsToAdapterRows,
+  productsToPlainRows,
+  productsToCsv,
+  productsToExcelHtml,
+  productsToXlsxBlob,
+  rowsToCsv,
+  rowsToXlsxBlob,
+} from "../lib/export.js";
 
 const FIELD_ORDER = ["product_name", "sku", "price"];
 
@@ -11,7 +21,11 @@ const SAMPLE_PRODUCTS = [
     fields: {
       product_name: { value: "Krzesło biurowe" },
       sku: { value: "X200-BLK" },
+      ean: { value: "5901234567890" },
+      brand: { value: "Acme" },
       price: { value: "199.99" },
+      description: { value: "<p>Wygodne krzesło do biura.</p><img src='x.jpg'>" },
+      images: { values: ["https://cdn.sklep.pl/x200.jpg", "https://cdn.sklep.pl/x200-side.png"] },
     },
   },
   {
@@ -92,4 +106,40 @@ test("productsToXlsxBlob generuje prawdziwy plik XLSX jako ZIP z arkuszem", asyn
   assert.match(text, /\[Content_Types\]\.xml/);
   assert.match(text, /xl\/worksheets\/sheet1\.xml/);
   assert.match(text, /Krzesło biurowe/);
+});
+
+test("normalizeImageTemplate buduje wzór z domeny zgodny z adapter request", () => {
+  assert.equal(normalizeImageTemplate("mojadomena.pl"), "https://mojadomena.pl/produkty/[sku].[rozszerzenie]");
+  assert.equal(normalizeImageTemplate("https://x.pl/img/[sku].[rozszerzenie]"), "https://x.pl/img/[sku].[rozszerzenie]");
+});
+
+test("productsToAdapterRows tworzy finalną strukturę kolumn i linki zdjN", () => {
+  const rows = productsToAdapterRows(SAMPLE_PRODUCTS, "mojadomena.pl");
+  assert.equal(rows[0].Cena, "199.99");
+  assert.equal(rows[0].SKU, "X200-BLK");
+  assert.equal(rows[0].EAN, "5901234567890");
+  assert.equal(rows[0].Marka, "Acme");
+  assert.equal(rows[0]["TYTUŁ OFERTY"], "Krzesło biurowe");
+  assert.match(rows[0].opis_dodatkowy4, /Parametry produktu/);
+  assert.ok(!rows[0].OPIS.includes("<img"));
+  assert.equal(rows[0].zdj1, "https://mojadomena.pl/produkty/X200-BLK.jpg");
+  assert.equal(rows[0].zdj2, "https://mojadomena.pl/produkty/X200-BLK.png");
+});
+
+test("headersForRows dokłada dynamiczne kolumny zdjęć na końcu", () => {
+  const headers = headersForRows([{ SKU: "A", zdj2: "b", zdj1: "a" }]);
+  assert.deepEqual(headers.slice(-2), ["zdj1", "zdj2"]);
+});
+
+test("rowsToCsv i rowsToXlsxBlob eksportują finalne wiersze adaptera", async () => {
+  const rows = productsToAdapterRows(SAMPLE_PRODUCTS, "mojadomena.pl");
+  const csv = rowsToCsv(rows);
+  assert.match(csv.split("\r\n")[0], /^Cena,SKU,EAN,OPIS/);
+  assert.match(csv, /zdj1,zdj2/);
+  assert.match(csv, /https:\/\/mojadomena\.pl\/produkty\/X200-BLK\.jpg/);
+
+  const blob = rowsToXlsxBlob(rows);
+  const text = new TextDecoder().decode(new Uint8Array(await blob.arrayBuffer()));
+  assert.match(text, /TYTUŁ OFERTY/);
+  assert.match(text, /https:\/\/mojadomena\.pl\/produkty\/X200-BLK\.png/);
 });

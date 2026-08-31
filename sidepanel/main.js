@@ -1,7 +1,7 @@
 import { PRODUCT_FIELDS, createDefaultConfig, slugifyDomain } from "../lib/schema.js";
-import { loadConfig, saveConfig, loadBridgeSettings, saveBridgeSettings, loadOpenAiSettings, saveOpenAiSettings } from "../lib/storage.js";
-import { createBridgeClient } from "../lib/bridge-client.js";
-import { downloadConfig, productsToCsv, productsToXlsxBlob } from "../lib/export.js";
+import { loadConfig, saveConfig, loadOpenAiSettings, saveOpenAiSettings } from "../lib/storage.js";
+import { productsToAdapterRows, rowsToCsv, rowsToJsonBlob, rowsToXlsxBlob } from "../lib/export.js";
+import { generateAdapterRows } from "../lib/openai-client.js";
 import { formatScanProgress } from "../lib/crawler.js";
 import * as fsdir from "../lib/fsdir.js";
 
@@ -23,8 +23,8 @@ const FIELD_LABELS = {
 
 const el = (id) => document.getElementById(id);
 
-/** @type {{tabId:number, domain:string, url:string, config: import('../lib/schema.js').ScraperConfig, projectId: string|null, scanning: boolean, scanProducts: any[], outputDirHandle: any, openai: {apiKey:string, model:string}}} */
-const state = { tabId: null, domain: "", url: "", config: null, projectId: null, scanning: false, scanProducts: [], outputDirHandle: null, openai: { apiKey: "", model: "" } };
+/** @type {{tabId:number, domain:string, url:string, config: import('../lib/schema.js').ScraperConfig, projectId: string|null, scanning: boolean, scanProducts: any[], adapterRows: any[]|null, outputDirHandle: any, openai: {apiKey:string, model:string}}} */
+const state = { tabId: null, domain: "", url: "", config: null, projectId: null, scanning: false, scanProducts: [], adapterRows: null, outputDirHandle: null, openai: { apiKey: "", model: "" } };
 
 function log(message) {
   const box = el("log-output");
@@ -54,6 +54,38 @@ function setExportButtonsDisabled(disabled) {
   for (const id of ["export-excel-btn", "export-csv-btn", "export-json-preview-btn", "export-images-btn"]) {
     el(id).disabled = disabled;
   }
+}
+
+function imageColumnsFromFallbackRows(fallbackRows) {
+  return fallbackRows.map((row) => Object.fromEntries(Object.entries(row).filter(([key]) => /^zdj\d+$/i.test(key))));
+}
+
+function mergeAiRowsWithImages(fallbackRows, aiRows) {
+  const imageColumns = imageColumnsFromFallbackRows(fallbackRows);
+  return fallbackRows.map((fallback, index) => {
+    const ai = (aiRows || []).find((row) => Number(row.index) === index) || aiRows?.[index] || {};
+    const cleanAi = { ...ai };
+    delete cleanAi.index;
+    return { ...fallback, ...cleanAi, ...imageColumns[index] };
+  });
+}
+
+async function generateAiRowsInBatches(products, batchSize = 8) {
+  const rows = [];
+  for (let offset = 0; offset < products.length; offset += batchSize) {
+    const batch = products.slice(offset, offset + batchSize);
+    el("scan-progress-wrap").hidden = false;
+    el("scan-progress-text").textContent = `AI generuje dane: ${Math.min(offset + batch.length, products.length)}/${products.length} produktów`;
+    const res = await generateAdapterRows({
+      apiKey: state.openai.apiKey,
+      model: state.openai.model,
+      products: batch,
+    });
+    for (const row of res.rows || []) {
+      rows.push({ ...row, index: Number(row.index) + offset });
+    }
+  }
+  return rows;
 }
 
 // --- komunikacja z aktywną kartą -------------------------------------------------
@@ -333,6 +365,7 @@ async function onScanCatalog() {
   readFormIntoConfig();
   state.scanning = true;
   state.scanProducts = [];
+  state.adapterRows = null;
   el("results-tbody").innerHTML = "";
   el("results-count").textContent = "0";
   el("results-card").hidden = true;
@@ -476,11 +509,35 @@ async function ensureScanResults() {
   return true;
 }
 
-async function onExportExcel() {
-  if (!(await ensureScanResults())) return;
+async function ensureAdapterRows() {
+  if (state.adapterRows) return state.adapterRows;
+  if (!(await ensureScanResults())) return null;
+
   readFormIntoConfig();
+  const fallbackRows = productsToAdapterRows(state.scanProducts, state.config.image_links.public_base_url);
+  if (!state.openai.apiKey) {
+    state.adapterRows = fallbackRows;
+    toast("Wygenerowano strukturę bez AI - brak klucza API");
+    return state.adapterRows;
+  }
+
   try {
-    const blob = productsToXlsxBlob(state.scanProducts, PRODUCT_FIELDS);
+    toast("AI tworzy finalną strukturę adaptera...");
+    const aiRows = await generateAiRowsInBatches(state.scanProducts);
+    state.adapterRows = mergeAiRowsWithImages(fallbackRows, aiRows);
+    toast(`AI wygenerowało dane (${state.openai.model || "gpt-5.6-luna"})`);
+  } catch (err) {
+    state.adapterRows = fallbackRows;
+    toast(`AI niedostępne - używam lokalnej struktury (${err.message || err})`, "err");
+  }
+  return state.adapterRows;
+}
+
+async function onExportExcel() {
+  const rows = await ensureAdapterRows();
+  if (!rows) return;
+  try {
+    const blob = rowsToXlsxBlob(rows);
     await writeOutput(`${slugifyDomain(state.config.domain)}.xlsx`, blob);
     toast("Zapisano XLSX");
   } catch (err) {
@@ -489,10 +546,10 @@ async function onExportExcel() {
 }
 
 async function onExportCsv() {
-  if (!(await ensureScanResults())) return;
-  readFormIntoConfig();
+  const rows = await ensureAdapterRows();
+  if (!rows) return;
   try {
-    const csv = productsToCsv(state.scanProducts, PRODUCT_FIELDS);
+    const csv = rowsToCsv(rows);
     const blob = new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8" });
     await writeOutput(`${slugifyDomain(state.config.domain)}.csv`, blob);
     toast("Zapisano CSV");
@@ -502,16 +559,16 @@ async function onExportCsv() {
 }
 
 async function onExportJsonPreview() {
-  if (!(await ensureScanResults())) return;
-  readFormIntoConfig();
+  const rows = await ensureAdapterRows();
+  if (!rows) return;
   try {
-    const payload = {
+    const metadata = {
       domain: state.config.domain,
       generated_at: new Date().toISOString(),
-      count: state.scanProducts.length,
-      products: state.scanProducts,
+      count: rows.length,
+      image_links: state.config.image_links,
     };
-    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+    const blob = rowsToJsonBlob(rows, metadata);
     await writeOutput(`${slugifyDomain(state.config.domain)}.json`, blob);
     toast("Zapisano JSON");
   } catch (err) {
@@ -599,41 +656,6 @@ async function onExportImages() {
   }
 }
 
-// --- zapis lokalny / eksport configu ------------------------------------------------
-
-async function onSaveConfig() {
-  readFormIntoConfig();
-  await saveConfig(state.config);
-  toast("Zapisano konfigurację dla domeny " + state.config.domain);
-}
-
-async function onExportJson() {
-  readFormIntoConfig();
-  await downloadConfig(state.config);
-  toast("Wyeksportowano JSON");
-}
-
-// --- integracja z bridgem ------------------------------------------------------------
-
-function bridge() {
-  return createBridgeClient(el("bridge-url-input").value.trim());
-}
-
-async function onBridgeCheck() {
-  try {
-    const res = await bridge().health();
-    el("bridge-dot").className = "dot ok";
-    el("bridge-status-text").textContent = `bridge: ok (${res.project_root ? "połączono" : "działa"})`;
-    log("Health check OK: " + JSON.stringify(res));
-    await saveBridgeSettings({ baseUrl: el("bridge-url-input").value.trim() });
-  } catch (err) {
-    el("bridge-dot").className = "dot err";
-    el("bridge-status-text").textContent = "bridge: niedostępny";
-    log("Health check FAILED: " + (err.message || err));
-    toast("Bridge niedostępny — sprawdź czy jest uruchomiony", "err");
-  }
-}
-
 /** Odświeża hero-checkbox "Użyj AI" + etykietę wg stanu state.openai (klucz z chrome.storage.local). */
 function refreshAiStatusUi() {
   const label = el("ai-status-label");
@@ -661,8 +683,15 @@ async function onApiKeyInputChange() {
   const apiKey = el("openai-api-key-input").value.trim();
   const model = el("openai-model-input").value.trim();
   state.openai = { apiKey, model };
+  state.adapterRows = null;
   await saveOpenAiSettings(state.openai);
   refreshAiStatusUi();
+}
+
+async function onImageDomainChange() {
+  readFormIntoConfig();
+  state.adapterRows = null;
+  await saveConfig(state.config);
 }
 
 async function onSaveAiSettings() {
@@ -680,85 +709,12 @@ async function onSaveAiSettings() {
 
 async function onClearAiSettings() {
   state.openai = { apiKey: "", model: "" };
+  state.adapterRows = null;
   await saveOpenAiSettings(state.openai);
   el("openai-api-key-input").value = "";
   el("openai-model-input").value = "";
   refreshAiStatusUi();
   toast("Usunięto klucz AI z tej przeglądarki");
-}
-
-async function onCreateProject() {
-  readFormIntoConfig();
-  try {
-    const res = await bridge().createProject({
-      domain: state.config.domain,
-      start_url: state.config.start_url,
-      mode: state.config.mode,
-      source_name: state.config.source.name,
-    });
-    state.projectId = res.id;
-    el("project-id-label").textContent = `project_id: ${res.id}`;
-    log("Utworzono/zaktualizowano projekt: " + JSON.stringify(res));
-    toast("Projekt gotowy: " + res.id);
-  } catch (err) {
-    toast(String(err.message || err), "err");
-    log("Błąd tworzenia projektu: " + (err.message || err));
-  }
-}
-
-async function withProject(fn) {
-  if (!state.projectId) {
-    toast("Najpierw utwórz projekt", "err");
-    return;
-  }
-  try {
-    await fn(state.projectId);
-  } catch (err) {
-    toast(String(err.message || err), "err");
-    log("Błąd: " + (err.message || err));
-  }
-}
-
-async function onPushConfig() {
-  readFormIntoConfig();
-  await withProject(async (id) => {
-    const res = await bridge().pushConfig(id, state.config);
-    log("Konfiguracja wysłana: " + JSON.stringify(res));
-    toast("Konfiguracja wysłana do bridge");
-  });
-}
-
-async function onGenerateAdapter() {
-  await withProject(async (id) => {
-    const res = await bridge().generateAdapter(id);
-    log("Wygenerowano adapter: " + JSON.stringify(res, null, 2));
-    toast(res.patched ? "Adapter wygenerowany i wypełniony" : "Adapter zeskafoldowany (wymaga ręcznego uzupełnienia)");
-  });
-}
-
-async function onRun() {
-  const formats = [];
-  if (el("export-csv").checked) formats.push("csv");
-  if (el("export-excel").checked) formats.push("excel");
-  await withProject(async (id) => {
-    const res = await bridge().run(id, formats);
-    log("Start uruchomienia: " + JSON.stringify(res));
-    toast("Scraper uruchomiony w tle (zdjęcia pobiorą się automatycznie)");
-  });
-}
-
-async function onStatus() {
-  await withProject(async (id) => {
-    const res = await bridge().status(id);
-    log("Status: " + JSON.stringify(res, null, 2));
-  });
-}
-
-async function onOutputs() {
-  await withProject(async (id) => {
-    const res = await bridge().outputs(id);
-    log("Outputy: " + JSON.stringify(res, null, 2));
-  });
 }
 
 // --- init ---------------------------------------------------------------------------
@@ -774,9 +730,6 @@ async function init() {
   state.config = existing || createDefaultConfig(state.domain, tab.url);
   if (!existing) state.config.start_url = tab.url;
 
-  const bridgeSettings = await loadBridgeSettings();
-  el("bridge-url-input").value = bridgeSettings.baseUrl;
-
   renderForm();
 
   state.outputDirHandle = await fsdir.restoreOutputDir();
@@ -786,6 +739,7 @@ async function init() {
   el("save-ai-settings-btn").addEventListener("click", onSaveAiSettings);
   el("clear-ai-settings-btn").addEventListener("click", onClearAiSettings);
   el("openai-api-key-input").addEventListener("change", onApiKeyInputChange);
+  el("image-base-url-input").addEventListener("change", onImageDomainChange);
 
   el("scan-btn").addEventListener("click", onScanCatalog);
   el("stop-scan-btn").addEventListener("click", onStopScan);
@@ -801,19 +755,8 @@ async function init() {
     if (btn) onPickField(btn.dataset.field);
   });
   el("detect-listing-btn").addEventListener("click", onDetectListing);
-  el("save-config-btn").addEventListener("click", onSaveConfig);
-  el("export-json-btn").addEventListener("click", onExportJson);
-  el("bridge-check-btn").addEventListener("click", onBridgeCheck);
-  el("create-project-btn").addEventListener("click", onCreateProject);
-  el("push-config-btn").addEventListener("click", onPushConfig);
-  el("generate-adapter-btn").addEventListener("click", onGenerateAdapter);
-  el("run-btn").addEventListener("click", onRun);
-  el("status-btn").addEventListener("click", onStatus);
-  el("outputs-btn").addEventListener("click", onOutputs);
 
   chrome.runtime.onMessage.addListener(onPickerMessage);
-
-  // Bridge jest trybem developerskim; prosty panel działa bez niego.
 }
 
 init().catch((err) => {

@@ -1,6 +1,15 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { cleanHtml, buildRequestBody, parseSuggestions, suggestFields, DEFAULT_MODEL } from "../lib/openai-client.js";
+import {
+  cleanHtml,
+  buildRequestBody,
+  buildAdapterRowsRequestBody,
+  parseAdapterRows,
+  parseSuggestions,
+  generateAdapterRows,
+  suggestFields,
+  DEFAULT_MODEL,
+} from "../lib/openai-client.js";
 
 test("cleanHtml usuwa script i style, zachowuje resztę", () => {
   const html = "<div>A</div><script>evil()</script><style>.x{color:red}</style><p>B</p>";
@@ -115,4 +124,75 @@ test("suggestFields rzuca czytelny błąd gdy fetch sam rzuci (np. brak sieci)",
     () => suggestFields({ apiKey: "sk-test", html: "<div></div>", url: "https://x.pl", fields: ["sku"], fetchImpl }),
     /Nie można połączyć się z OpenAI/
   );
+});
+
+test("buildAdapterRowsRequestBody wysyła produkty i wymusza strukturę adapter request", () => {
+  const body = buildAdapterRowsRequestBody([
+    {
+      url: "https://sklep.pl/p/1",
+      ok: true,
+      fields: {
+        product_name: { value: "Krzesło" },
+        sku: { value: "K1" },
+        description: { value: "Opis" },
+        images: { values: ["https://cdn.pl/k1.jpg"] },
+      },
+    },
+  ], "gpt-5.6-luna");
+  assert.equal(body.model, "gpt-5.6-luna");
+  assert.equal(body.response_format.json_schema.name, "adapter_rows");
+  assert.match(body.messages[1].content, /TYTUŁ OFERTY/);
+  assert.match(body.messages[1].content, /Krzesło/);
+});
+
+test("parseAdapterRows parsuje finalne wiersze z odpowiedzi OpenAI", () => {
+  const row = {
+    index: 0,
+    Cena: "10",
+    SKU: "K1",
+    EAN: "",
+    OPIS: "<strong>Opis</strong><br>Tekst",
+    opis_dodatkowy1: "<strong>Opis</strong><br>Tekst",
+    opis_dodatkowy2: "<strong>Cechy</strong><br>",
+    opis_dodatkowy3: "<strong>Zastosowanie</strong><br>",
+    opis_dodatkowy4: "<strong>Parametry produktu</strong><br>",
+    Marka: "Acme",
+    "TYTUŁ OFERTY": "Krzesło Acme",
+    "KOD PRODUCENTA": "K1",
+    UWAGI: "",
+  };
+  const rows = parseAdapterRows({ choices: [{ message: { content: JSON.stringify({ rows: [row] }) } }] });
+  assert.deepEqual(rows, [row]);
+});
+
+test("generateAdapterRows woła OpenAI i zwraca finalne wiersze", async () => {
+  const fakeRow = {
+    index: 0,
+    Cena: "10",
+    SKU: "K1",
+    EAN: "",
+    OPIS: "Opis",
+    opis_dodatkowy1: "Opis 1",
+    opis_dodatkowy2: "Opis 2",
+    opis_dodatkowy3: "Opis 3",
+    opis_dodatkowy4: "Parametry",
+    Marka: "Acme",
+    "TYTUŁ OFERTY": "Krzesło Acme",
+    "KOD PRODUCENTA": "K1",
+    UWAGI: "",
+  };
+  const fetchImpl = async (url, opts) => {
+    assert.equal(url, "https://api.openai.com/v1/chat/completions");
+    assert.equal(opts.headers.Authorization, "Bearer sk-test");
+    const body = JSON.parse(opts.body);
+    assert.equal(body.response_format.json_schema.name, "adapter_rows");
+    return {
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ choices: [{ message: { content: JSON.stringify({ rows: [fakeRow] }) } }] }),
+    };
+  };
+  const res = await generateAdapterRows({ apiKey: "sk-test", products: [{ url: "https://x.pl", fields: {} }], fetchImpl });
+  assert.equal(res.model, DEFAULT_MODEL);
+  assert.deepEqual(res.rows, [fakeRow]);
 });

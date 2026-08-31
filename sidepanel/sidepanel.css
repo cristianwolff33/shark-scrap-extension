@@ -8,6 +8,10 @@
   --muted: #b7a7bf;
   --line: rgba(194, 232, 18, 0.24);
   --soft: rgba(255, 255, 255, 0.08);
+  --csv: #c2e812;
+  --xlsx: #35f2d0;
+  --json: #b86bff;
+  --images: #ffcf33;
   --danger: #ff3d6e;
   --ok: #7dff9d;
   --warn: #ffd166;
@@ -238,14 +242,16 @@ h1 {
 }
 
 .action-btn {
+  --action-color: var(--neon);
+  --action-glow: rgba(194, 232, 18, 0.22);
   display: flex;
   min-height: 82px;
   flex-direction: column;
   align-items: flex-start;
   justify-content: space-between;
-  border: 1px solid rgba(194, 232, 18, 0.36);
+  border: 1px solid color-mix(in srgb, var(--action-color) 58%, transparent);
   border-radius: 8px;
-  background: linear-gradient(180deg, rgba(194, 232, 18, 0.13), rgba(194, 232, 18, 0.03));
+  background: linear-gradient(180deg, color-mix(in srgb, var(--action-color) 16%, transparent), rgba(194, 232, 18, 0.03));
   color: var(--text);
   cursor: pointer;
   padding: 12px;
@@ -255,9 +261,9 @@ h1 {
 
 .action-btn:hover {
   transform: translateY(-1px);
-  border-color: var(--neon);
-  background: linear-gradient(180deg, rgba(194, 232, 18, 0.2), rgba(194, 232, 18, 0.06));
-  box-shadow: 0 0 24px rgba(194, 232, 18, 0.22);
+  border-color: var(--action-color);
+  background: linear-gradient(180deg, color-mix(in srgb, var(--action-color) 24%, transparent), rgba(194, 232, 18, 0.06));
+  box-shadow: 0 0 24px var(--action-glow);
 }
 
 .action-btn:disabled {
@@ -274,10 +280,30 @@ h1 {
 }
 
 .action-btn strong {
-  color: var(--neon);
+  color: var(--action-color);
   font-size: 22px;
   font-weight: 950;
   line-height: 1;
+}
+
+.action-btn.csv {
+  --action-color: var(--csv);
+  --action-glow: rgba(194, 232, 18, 0.26);
+}
+
+.action-btn.xlsx {
+  --action-color: var(--xlsx);
+  --action-glow: rgba(53, 242, 208, 0.25);
+}
+
+.action-btn.json {
+  --action-color: var(--json);
+  --action-glow: rgba(184, 107, 255, 0.25);
+}
+
+.action-btn.images {
+  --action-color: var(--images);
+  --action-glow: rgba(255, 207, 51, 0.24);
 }
 
 .stop-btn,

@@ -525,7 +525,8 @@ async function ensureAdapterRows() {
     toast("AI tworzy finalną strukturę adaptera...");
     const aiRows = await generateAiRowsInBatches(state.scanProducts);
     state.adapterRows = mergeAiRowsWithImages(fallbackRows, aiRows);
-    toast(`AI wygenerowało dane (${state.openai.model || "gpt-5.6-luna"})`);
+    el("scan-progress-text").textContent = `AI wygenerowało finalną strukturę dla ${state.adapterRows.length} produktów.`;
+    toast(`AI wygenerowało dane (${state.openai.model || "gpt-5.6-sol"})`);
   } catch (err) {
     state.adapterRows = fallbackRows;
     toast(`AI niedostępne - używam lokalnej struktury (${err.message || err})`, "err");
@@ -661,7 +662,7 @@ function refreshAiStatusUi() {
   const label = el("ai-status-label");
   const checkbox = el("use-ai-checkbox");
   if (state.openai.apiKey) {
-    label.textContent = `AI połączone, model: ${state.openai.model || "gpt-5.6-luna"}`;
+    label.textContent = `AI połączone, model: ${state.openai.model || "gpt-5.6-sol"}`;
     checkbox.disabled = false;
     checkbox.checked = true;
   } else {
@@ -674,6 +675,10 @@ function refreshAiStatusUi() {
 /** Wczytuje zapisany klucz OpenAI z chrome.storage.local do state + formularza ustawień. */
 async function loadAiSettingsIntoUi() {
   state.openai = await loadOpenAiSettings();
+  if (state.openai.model === "gpt-5.6-luna") {
+    state.openai.model = "";
+    await saveOpenAiSettings(state.openai);
+  }
   el("openai-api-key-input").value = state.openai.apiKey || "";
   el("openai-model-input").value = state.openai.model || "";
   refreshAiStatusUi();

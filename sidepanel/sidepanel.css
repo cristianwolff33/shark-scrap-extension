@@ -237,18 +237,18 @@ h1 {
 .action-grid {
   position: relative;
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: 1fr;
   gap: 10px;
 }
 
 .action-btn {
   --action-color: var(--neon);
   --action-glow: rgba(194, 232, 18, 0.22);
-  display: flex;
-  min-height: 82px;
-  flex-direction: column;
-  align-items: flex-start;
-  justify-content: space-between;
+  display: grid;
+  min-height: 68px;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 12px;
   border: 1px solid color-mix(in srgb, var(--action-color) 58%, transparent);
   border-radius: 8px;
   background: linear-gradient(180deg, color-mix(in srgb, var(--action-color) 16%, transparent), rgba(194, 232, 18, 0.03));
@@ -281,7 +281,7 @@ h1 {
 
 .action-btn strong {
   color: var(--action-color);
-  font-size: 22px;
+  font-size: 24px;
   font-weight: 950;
   line-height: 1;
 }
@@ -443,10 +443,6 @@ h1 {
 }
 
 @media (max-width: 360px) {
-  .action-grid {
-    grid-template-columns: 1fr;
-  }
-
   h1 {
     font-size: 22px;
   }

@@ -517,7 +517,7 @@ async function ensureAdapterRows() {
   const fallbackRows = productsToAdapterRows(state.scanProducts, state.config.image_links.public_base_url);
   if (!state.openai.apiKey) {
     state.adapterRows = fallbackRows;
-    toast("Wygenerowano strukturę bez AI - brak klucza API");
+    toast("Wygenerowano strukturę bez AI - connector nie jest połączony");
     return state.adapterRows;
   }
 
@@ -661,11 +661,11 @@ function refreshAiStatusUi() {
   const label = el("ai-status-label");
   const checkbox = el("use-ai-checkbox");
   if (state.openai.apiKey) {
-    label.textContent = `Klucz zapisany, model: ${state.openai.model || "gpt-5.6-luna"}`;
+    label.textContent = `AI połączone, model: ${state.openai.model || "gpt-5.6-luna"}`;
     checkbox.disabled = false;
     checkbox.checked = true;
   } else {
-    label.textContent = "Brak klucza API - AI jest wyłączone";
+    label.textContent = "AI niepołączone";
     checkbox.disabled = true;
     checkbox.checked = false;
   }
@@ -698,13 +698,13 @@ async function onSaveAiSettings() {
   const apiKey = el("openai-api-key-input").value.trim();
   const model = el("openai-model-input").value.trim();
   if (!apiKey) {
-    toast("Podaj klucz API Codex / OpenAI (sk-...)", "err");
+    toast("Podaj token połączenia AI", "err");
     return;
   }
   state.openai = { apiKey, model };
   await saveOpenAiSettings(state.openai);
   refreshAiStatusUi();
-  toast("Zapisano klucz API");
+  toast("Codex connector połączony");
 }
 
 async function onClearAiSettings() {
@@ -714,7 +714,7 @@ async function onClearAiSettings() {
   el("openai-api-key-input").value = "";
   el("openai-model-input").value = "";
   refreshAiStatusUi();
-  toast("Usunięto klucz AI z tej przeglądarki");
+  toast("Codex connector rozłączony");
 }
 
 // --- init ---------------------------------------------------------------------------

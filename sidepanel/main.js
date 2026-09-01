@@ -728,6 +728,15 @@ function bridgeDownloadHref(downloadUrl) {
   return new URL(downloadUrl, currentFrameworkBaseUrl()).href;
 }
 
+function markFrameworkDownloadLink(link, downloadUrl, filename) {
+  link.href = bridgeDownloadHref(downloadUrl);
+  link.target = "_blank";
+  link.rel = "noopener noreferrer";
+  link.download = filename || "";
+  link.dataset.downloadUrl = downloadUrl;
+  link.dataset.downloadName = filename || "";
+}
+
 function appendFrameworkOutputGroup(box, label, files) {
   const line = document.createElement("div");
   line.appendChild(document.createTextNode(`${label}: `));
@@ -741,10 +750,7 @@ function appendFrameworkOutputGroup(box, label, files) {
     if (idx > 0) line.appendChild(document.createTextNode(", "));
     if (file.download_url) {
       const link = document.createElement("a");
-      link.href = bridgeDownloadHref(file.download_url);
-      link.target = "_blank";
-      link.rel = "noopener noreferrer";
-      link.download = file.name || "";
+      markFrameworkDownloadLink(link, file.download_url, file.name || "");
       link.textContent = file.name || file.path;
       line.appendChild(link);
     } else {
@@ -768,10 +774,11 @@ function renderFrameworkOutputs(outputs) {
     const zip = document.createElement("div");
     zip.appendChild(document.createTextNode("Archiwum: "));
     const link = document.createElement("a");
-    link.href = bridgeDownloadHref(outputs.zip_download_url);
-    link.target = "_blank";
-    link.rel = "noopener noreferrer";
-    link.download = state.bridge.jobId ? `${state.bridge.jobId}-outputs.zip` : "";
+    markFrameworkDownloadLink(
+      link,
+      outputs.zip_download_url,
+      state.bridge.jobId ? `${state.bridge.jobId}-outputs.zip` : "outputs.zip",
+    );
     link.textContent = "ZIP";
     zip.appendChild(link);
     box.appendChild(zip);
@@ -782,6 +789,47 @@ function renderFrameworkOutputs(outputs) {
     box.appendChild(note);
   }
   box.hidden = false;
+}
+
+function safeFrameworkDownloadName(filename) {
+  return String(filename || "output").replace(/[\\/:*?"<>|]+/g, "_");
+}
+
+async function downloadCloudFrameworkOutput(downloadUrl, filename) {
+  const url = bridgeDownloadHref(downloadUrl);
+  const res = await fetch(url, { headers: currentFrameworkHeaders() });
+  if (!res.ok) {
+    let detail = "";
+    try {
+      detail = (await res.json())?.detail || "";
+    } catch (_) {
+      detail = await res.text().catch(() => "");
+    }
+    throw new Error(detail || `Cloud download HTTP ${res.status}`);
+  }
+  const blob = await res.blob();
+  const objUrl = URL.createObjectURL(blob);
+  try {
+    await chrome.downloads.download({
+      url: objUrl,
+      filename: `shark-scrap/cloud/${safeFrameworkDownloadName(filename)}`,
+      saveAs: false,
+    });
+  } finally {
+    setTimeout(() => URL.revokeObjectURL(objUrl), 10_000);
+  }
+}
+
+async function onFrameworkOutputClick(event) {
+  const link = event.target.closest("a[data-download-url]");
+  if (!link || !isCloudMode()) return;
+  event.preventDefault();
+  try {
+    await downloadCloudFrameworkOutput(link.dataset.downloadUrl, link.dataset.downloadName || link.download);
+    toast("Pobieranie rozpoczęte");
+  } catch (err) {
+    toastError(err);
+  }
 }
 
 function syncFrameworkModeUi() {
@@ -1064,6 +1112,7 @@ async function init() {
   el("framework-mode-cloud").addEventListener("change", saveBridgeSettingsFromForm);
   el("check-bridge-btn").addEventListener("click", onCheckBridge);
   el("framework-export-btn").addEventListener("click", onFrameworkExport);
+  el("framework-outputs").addEventListener("click", onFrameworkOutputClick);
 
   el("scan-btn").addEventListener("click", onScanCatalog);
   el("stop-scan-btn").addEventListener("click", onStopScan);

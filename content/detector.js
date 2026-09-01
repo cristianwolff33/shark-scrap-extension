@@ -218,7 +218,21 @@ const REQUEST_DELAY_MS = 350; // uprzejmość wobec serwera sklepu — ten sam r
  * meta > dom). Zwraca zebrane produkty + wykryty listing/pola/pagination, żeby panel mógł
  * wypełnić resztę formularza (do ręcznej korekty, jeśli coś zawiodło).
  */
-async function scanCatalog({ maxPages, maxProducts, useAI, apiKey, aiModel } = {}) {
+async function suggestMissingFieldsWithAi({ apiKey, aiModel, aiProvider, cloudAi }, bestSamplePair, missing) {
+  const html = bestSamplePair.doc.documentElement.outerHTML;
+  if (aiProvider === "cloud") {
+    const { createBridgeClient } = await loadLib("bridge-client.js");
+    const client = createBridgeClient(cloudAi?.baseUrl || "http://127.0.0.1:8766", fetch, {
+      headers: cloudAi?.headers || {},
+      serviceName: "cloud AI",
+    });
+    return client.suggestFields({ html, url: bestSamplePair.url, fields: missing, model: aiModel });
+  }
+  const { suggestFields } = await loadLib("openai-client.js");
+  return suggestFields({ apiKey, model: aiModel, html, url: bestSamplePair.url, fields: missing });
+}
+
+async function scanCatalog({ maxPages, maxProducts, useAI, apiKey, aiModel, aiProvider, cloudAi } = {}) {
   scanStopRequested = false;
   const { resolveUrl, dedupe, capArray, guessAdapterMode, isAutoFollowablePagination, pickBestSample } = await loadLib("crawler.js");
 
@@ -307,17 +321,15 @@ async function scanCatalog({ maxPages, maxProducts, useAI, apiKey, aiModel } = {
   // 2b. Fallback AI (opt-in, patrz sidepanel — checkbox "Użyj AI"): TYLKO dla pól, których nic
   // powyższego nie znalazło, TYLKO raz na skan (kontrola kosztu), a zwrócony selektor jest
   // ZAWSZE zweryfikowany na żywym DOM próbki przed przyjęciem — nigdy nie ufamy modelowi ślepo.
-  // Woła OpenAI BEZPOŚREDNIO z przeglądarki (lib/openai-client.js) — klucz API leży w
-  // chrome.storage.local (ustawiony w sidepanelu), bez żadnego pośredniczącego serwera.
-  if (useAI && apiKey && bestSamplePair) {
+  // W trybie cloud woła backendowe AI API (klucze modelu zostają na serwerze). W trybie local
+  // zostaje direct OpenAI dev flow z chrome.storage.local.
+  if (useAI && bestSamplePair && (aiProvider === "cloud" || apiKey)) {
     const { PRODUCT_FIELDS } = await loadLib("schema.js");
     const { valueForAttr } = await loadLib("selectors.js");
     const missing = PRODUCT_FIELDS.filter((f) => !fieldMap[f]);
     if (missing.length > 0) {
       try {
-        const { suggestFields } = await loadLib("openai-client.js");
-        const html = bestSamplePair.doc.documentElement.outerHTML;
-        const res = await suggestFields({ apiKey, model: aiModel, html, url: bestSamplePair.url, fields: missing });
+        const res = await suggestMissingFieldsWithAi({ apiKey, aiModel, aiProvider, cloudAi }, bestSamplePair, missing);
         let accepted = 0;
         for (const s of res.suggestions || []) {
           if (!s.found || !s.selector) continue;

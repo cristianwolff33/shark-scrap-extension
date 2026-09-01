@@ -70,14 +70,24 @@ test("createBridgeClient obsługuje cloud auth i billing endpointy", async () =>
   await client.me();
   await client.billingPlans();
   await client.billingStatus();
+  await client.aiCapabilities();
+  await client.suggestFields({ html: "<h1>Produkt</h1>", url: "https://x.pl/p/1", fields: ["product_name"] });
+  await client.normalizeProducts({ products: [{ url: "https://x.pl/p/1", fields: {} }] });
   await client.checkoutSession("pro");
 
   assert.equal(calls[0].url, "http://127.0.0.1:8766/me");
   assert.equal(calls[1].url, "http://127.0.0.1:8766/billing/plans");
   assert.equal(calls[2].url, "http://127.0.0.1:8766/billing/status");
-  assert.equal(calls[3].url, "http://127.0.0.1:8766/billing/checkout-session");
-  assert.equal(calls[3].opts.method, "POST");
-  assert.deepEqual(JSON.parse(calls[3].opts.body), { plan: "pro" });
+  assert.equal(calls[3].url, "http://127.0.0.1:8766/ai/capabilities");
+  assert.equal(calls[4].url, "http://127.0.0.1:8766/ai/suggest-fields");
+  assert.equal(calls[4].opts.method, "POST");
+  assert.deepEqual(JSON.parse(calls[4].opts.body), { html: "<h1>Produkt</h1>", url: "https://x.pl/p/1", fields: ["product_name"] });
+  assert.equal(calls[5].url, "http://127.0.0.1:8766/ai/normalize-products");
+  assert.equal(calls[5].opts.method, "POST");
+  assert.deepEqual(JSON.parse(calls[5].opts.body), { products: [{ url: "https://x.pl/p/1", fields: {} }] });
+  assert.equal(calls[6].url, "http://127.0.0.1:8766/billing/checkout-session");
+  assert.equal(calls[6].opts.method, "POST");
+  assert.deepEqual(JSON.parse(calls[6].opts.body), { plan: "pro" });
   for (const call of calls) {
     assert.equal(call.opts.headers["X-Shark-User-Id"], "alice");
     assert.equal(call.opts.headers["Content-Type"], "application/json");

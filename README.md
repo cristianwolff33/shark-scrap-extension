@@ -13,6 +13,12 @@ scrapingu e-commerce bez ręcznego pisania adaptera. Pełna instrukcja: [`../doc
 - `background.js` — service worker (tylko otwiera side panel).
 - `test/` — testy jednostkowe czystej logiki (bez przeglądarki, bez npm).
 
+AI:
+
+- Local/dev mode może używać prywatnego tokenu OpenAI zapisanego lokalnie w Chrome.
+- Cloud mode używa backendowych endpointów `/ai/*`; model wybiera backend według planu
+  użytkownika, więc wtyczka nie potrzebuje klucza OpenAI/Claude.
+
 ## Testy
 
 ```bash

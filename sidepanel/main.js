@@ -98,6 +98,14 @@ function frameworkLabel() {
   return isCloudMode() ? "Cloud" : "Framework";
 }
 
+function isAiAvailable() {
+  return isCloudMode() || !!state.openai.apiKey;
+}
+
+function currentAiLabel() {
+  return isCloudMode() ? "backend wybiera model" : state.openai.model || "gpt-5.6-sol";
+}
+
 function currentFrameworkBaseUrl() {
   if (isCloudMode()) return state.bridge.cloudBaseUrl || "http://127.0.0.1:8766";
   return state.bridge.localBaseUrl || state.bridge.baseUrl || "http://127.0.0.1:8765";
@@ -136,20 +144,26 @@ function mergeAiRowsWithImages(fallbackRows, aiRows) {
 
 async function generateAiRowsInBatches(products, batchSize = 8) {
   const rows = [];
+  const cloudClient = isCloudMode() ? bridgeClient() : null;
+  let model = "";
   for (let offset = 0; offset < products.length; offset += batchSize) {
     const batch = products.slice(offset, offset + batchSize);
     el("scan-progress-wrap").hidden = false;
     el("scan-progress-text").textContent = `AI generuje dane: ${Math.min(offset + batch.length, products.length)}/${products.length} produktów`;
-    const res = await generateAdapterRows({
-      apiKey: state.openai.apiKey,
-      model: state.openai.model,
-      products: batch,
-    });
+    const res = cloudClient
+      ? await cloudClient.normalizeProducts({ products: batch, model: state.openai.model || "" })
+      : await generateAdapterRows({
+          apiKey: state.openai.apiKey,
+          model: state.openai.model,
+          products: batch,
+        });
+    model = res.model || model;
     for (const row of res.rows || []) {
-      rows.push({ ...row, index: Number(row.index) + offset });
+      const localIndex = Number(row.index);
+      rows.push({ ...row, index: Number.isFinite(localIndex) ? localIndex + offset : rows.length });
     }
   }
-  return rows;
+  return { rows, model };
 }
 
 // --- komunikacja z aktywną kartą -------------------------------------------------
@@ -426,6 +440,8 @@ function renderWarnings(warnings) {
 }
 
 async function onScanCatalog() {
+  await saveBridgeSettingsFromForm({ resetJob: false });
+  await onApiKeyInputChange();
   readFormIntoConfig();
   state.scanning = true;
   state.scanProducts = [];
@@ -445,9 +461,19 @@ async function onScanCatalog() {
   try {
     const maxPages = Number(el("max-pages-input").value) || 20;
     const useAI = el("use-ai-checkbox").checked;
+    const cloudAi = isCloudMode()
+      ? { baseUrl: currentFrameworkBaseUrl(), headers: currentFrameworkHeaders() }
+      : null;
     const result = await sendToTab(state.tabId, {
       action: "SCAN_CATALOG",
-      options: { maxPages, useAI, apiKey: state.openai.apiKey, aiModel: state.openai.model },
+      options: {
+        maxPages,
+        useAI,
+        apiKey: isCloudMode() ? "" : state.openai.apiKey,
+        aiModel: state.openai.model,
+        aiProvider: isCloudMode() ? "cloud" : "openai",
+        cloudAi,
+      },
     });
     if (result?.error) throw new Error(result.error);
 
@@ -561,6 +587,7 @@ async function writeOutput(filename, blob) {
 }
 
 async function ensureScanResults() {
+  await saveBridgeSettingsFromForm({ resetJob: false });
   await onApiKeyInputChange();
   if (state.scanProducts.length > 0) return true;
   if (state.scanning) return false;
@@ -579,7 +606,7 @@ async function ensureAdapterRows() {
 
   readFormIntoConfig();
   const fallbackRows = productsToAdapterRows(state.scanProducts, state.config.image_links.public_base_url);
-  if (!state.openai.apiKey) {
+  if (!isAiAvailable()) {
     state.adapterRows = fallbackRows;
     toast("Wygenerowano strukturę bez AI - connector nie jest połączony");
     return state.adapterRows;
@@ -587,10 +614,10 @@ async function ensureAdapterRows() {
 
   try {
     toast("AI tworzy finalną strukturę adaptera...");
-    const aiRows = await generateAiRowsInBatches(state.scanProducts);
-    state.adapterRows = mergeAiRowsWithImages(fallbackRows, aiRows);
+    const aiResult = await generateAiRowsInBatches(state.scanProducts);
+    state.adapterRows = mergeAiRowsWithImages(fallbackRows, aiResult.rows);
     el("scan-progress-text").textContent = `AI wygenerowało finalną strukturę dla ${state.adapterRows.length} produktów.`;
-    toast(`AI wygenerowało dane (${state.openai.model || "gpt-5.6-sol"})`);
+    toast(`AI wygenerowało dane (${aiResult.model || currentAiLabel()})`);
   } catch (err) {
     state.adapterRows = fallbackRows;
     toast(`AI niedostępne - używam lokalnej struktury (${err.message || err})`, "err");
@@ -848,6 +875,7 @@ function syncFrameworkModeUi() {
     el("framework-job-progress").textContent = modeText;
     setBridgeStatus("nie sprawdzono", "idle");
   }
+  refreshAiStatusUi();
 }
 
 async function saveBridgeSettingsFromForm(options = {}) {
@@ -884,8 +912,9 @@ async function onCheckBridge() {
       if (isCloudMode()) {
         const me = await client.me();
         const billing = await client.billingStatus();
+        const aiInfo = await client.aiCapabilities();
         setBridgeStatus(`${billing.plan} ${billing.jobs_used}/${billing.jobs_limit}`, billing.can_create_job ? "ok" : "err");
-        progress.textContent = `Cloud: ${me.id}, plan ${billing.plan}, joby ${billing.jobs_used}/${billing.jobs_limit}`;
+        progress.textContent = `Cloud: ${me.id}, plan ${billing.plan}, joby ${billing.jobs_used}/${billing.jobs_limit}, AI ${aiInfo.model}`;
         toast("Cloud API połączone");
         return true;
       }
@@ -1008,10 +1037,16 @@ async function onFrameworkExport() {
   }
 }
 
-/** Odświeża hero-checkbox "Użyj AI" + etykietę wg stanu state.openai (klucz z chrome.storage.local). */
+/** Odświeża hero-checkbox "Użyj AI" + etykietę wg trybu: local token albo backend cloud. */
 function refreshAiStatusUi() {
   const label = el("ai-status-label");
   const checkbox = el("use-ai-checkbox");
+  if (isCloudMode()) {
+    label.textContent = "AI przez Cloud - model wybiera backend";
+    checkbox.disabled = false;
+    checkbox.checked = true;
+    return;
+  }
   if (state.openai.apiKey) {
     label.textContent = `AI połączone, model: ${state.openai.model || "gpt-5.6-sol"}`;
     checkbox.disabled = false;

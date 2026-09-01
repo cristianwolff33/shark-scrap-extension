@@ -695,25 +695,59 @@ async function onExportImages() {
 
 // --- pełny eksport przez framework/bridge -----------------------------------------
 
+function bridgeDownloadHref(downloadUrl) {
+  if (!downloadUrl) return "";
+  return new URL(downloadUrl, state.bridge.baseUrl || "http://127.0.0.1:8765").href;
+}
+
+function appendFrameworkOutputGroup(box, label, files) {
+  const line = document.createElement("div");
+  line.appendChild(document.createTextNode(`${label}: `));
+  if (!files.length) {
+    line.appendChild(document.createTextNode("brak plików"));
+    box.appendChild(line);
+    return;
+  }
+
+  files.forEach((file, idx) => {
+    if (idx > 0) line.appendChild(document.createTextNode(", "));
+    if (file.download_url) {
+      const link = document.createElement("a");
+      link.href = bridgeDownloadHref(file.download_url);
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      link.download = file.name || "";
+      link.textContent = file.name || file.path;
+      line.appendChild(link);
+    } else {
+      line.appendChild(document.createTextNode(file.path || file.name));
+    }
+  });
+  box.appendChild(line);
+}
+
 function renderFrameworkOutputs(outputs) {
   const box = el("framework-outputs");
   box.innerHTML = "";
-  const groups = [
-    ["CSV", outputs?.csv || []],
-    ["Excel", outputs?.excel || []],
-  ];
-  for (const [label, files] of groups) {
-    const line = document.createElement("div");
-    line.textContent = files.length
-      ? `${label}: ${files.map((file) => file.path || file.name).join(", ")}`
-      : `${label}: brak plików`;
-    box.appendChild(line);
-  }
+  appendFrameworkOutputGroup(box, "CSV", outputs?.csv || []);
+  appendFrameworkOutputGroup(box, "Excel", outputs?.excel || []);
   const images = document.createElement("div");
   images.textContent = (outputs?.image_dirs || []).length
     ? `Zdjęcia: ${(outputs.image_dirs || []).join(", ")}`
     : "Zdjęcia: brak folderów";
   box.appendChild(images);
+  if (outputs?.zip_download_url) {
+    const zip = document.createElement("div");
+    zip.appendChild(document.createTextNode("Archiwum: "));
+    const link = document.createElement("a");
+    link.href = bridgeDownloadHref(outputs.zip_download_url);
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    link.download = state.bridge.jobId ? `${state.bridge.jobId}-outputs.zip` : "";
+    link.textContent = "ZIP";
+    zip.appendChild(link);
+    box.appendChild(zip);
+  }
   if (outputs?.note) {
     const note = document.createElement("div");
     note.textContent = outputs.note;

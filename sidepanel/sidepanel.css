@@ -306,6 +306,87 @@ h1 {
   --action-glow: rgba(255, 207, 51, 0.24);
 }
 
+.framework-box {
+  position: relative;
+  margin-top: 12px;
+  border: 1px solid rgba(53, 242, 208, 0.28);
+  border-radius: 8px;
+  background: rgba(13, 4, 18, 0.58);
+  padding: 12px;
+}
+
+.framework-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.framework-head span {
+  display: block;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.framework-head strong {
+  color: var(--xlsx);
+  font-size: 18px;
+  font-weight: 950;
+  line-height: 1;
+}
+
+.framework-url-field {
+  margin-bottom: 10px;
+}
+
+.framework-btn {
+  display: grid;
+  width: 100%;
+  min-height: 54px;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid rgba(53, 242, 208, 0.48);
+  border-radius: 8px;
+  background: linear-gradient(180deg, rgba(53, 242, 208, 0.16), rgba(53, 242, 208, 0.04));
+  color: var(--text);
+  cursor: pointer;
+  padding: 10px 12px;
+  text-align: left;
+}
+
+.framework-btn span {
+  font-size: 13px;
+  font-weight: 950;
+}
+
+.framework-btn strong {
+  color: var(--xlsx);
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.framework-btn:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.framework-outputs {
+  margin-top: 10px;
+  border-top: 1px solid var(--soft);
+  padding-top: 8px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.framework-outputs div {
+  margin-top: 5px;
+  word-break: break-word;
+}
+
 .stop-btn,
 .folder-btn {
   min-height: 34px;

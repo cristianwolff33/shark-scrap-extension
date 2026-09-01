@@ -62,6 +62,26 @@
         </button>
       </div>
 
+      <section class="framework-box">
+        <div class="framework-head">
+          <div>
+            <span>Pełny eksport</span>
+            <strong>Framework</strong>
+          </div>
+          <button id="check-bridge-btn" type="button" class="settings-btn ghost">Sprawdź</button>
+        </div>
+        <label class="domain-form framework-url-field">
+          <span>API frameworka</span>
+          <input id="bridge-base-url-input" type="text" placeholder="http://127.0.0.1:8765" autocomplete="off" />
+        </label>
+        <button id="framework-export-btn" type="button" class="framework-btn">
+          <span>Uruchom pełny eksport</span>
+          <strong id="bridge-status-label">nie sprawdzono</strong>
+        </button>
+        <div id="framework-job-progress" class="subtle">Framework: nie sprawdzono połączenia</div>
+        <div id="framework-outputs" class="framework-outputs" hidden></div>
+      </section>
+
       <div id="scan-progress-wrap" class="progress-wrap" hidden>
         <div class="progress-bar"><div id="scan-progress-fill" class="progress-fill"></div></div>
         <div id="scan-progress-text" class="subtle">-</div>

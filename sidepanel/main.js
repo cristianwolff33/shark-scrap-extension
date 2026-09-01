@@ -1,5 +1,6 @@
 import { PRODUCT_FIELDS, createDefaultConfig, slugifyDomain } from "../lib/schema.js";
-import { loadConfig, saveConfig, loadOpenAiSettings, saveOpenAiSettings } from "../lib/storage.js";
+import { createBridgeClient } from "../lib/bridge-client.js";
+import { loadBridgeSettings, loadConfig, saveBridgeSettings, saveConfig, loadOpenAiSettings, saveOpenAiSettings } from "../lib/storage.js";
 import { productsToAdapterRows, rowsToCsv, rowsToJsonBlob, rowsToXlsxBlob } from "../lib/export.js";
 import { generateAdapterRows } from "../lib/openai-client.js";
 import { formatScanProgress } from "../lib/crawler.js";
@@ -23,8 +24,33 @@ const FIELD_LABELS = {
 
 const el = (id) => document.getElementById(id);
 
-/** @type {{tabId:number, domain:string, url:string, config: import('../lib/schema.js').ScraperConfig, projectId: string|null, scanning: boolean, scanProducts: any[], adapterRows: any[]|null, outputDirHandle: any, openai: {apiKey:string, model:string}}} */
-const state = { tabId: null, domain: "", url: "", config: null, projectId: null, scanning: false, scanProducts: [], adapterRows: null, outputDirHandle: null, openai: { apiKey: "", model: "" } };
+const JOB_DONE_STATUSES = new Set(["completed", "failed", "cancelled", "timeout"]);
+const JOB_STATUS_LABELS = {
+  queued: "W kolejce",
+  preparing_workspace: "Przygotowanie",
+  generating_adapter: "Generowanie adaptera",
+  running_scraper: "Scrapowanie",
+  uploading_outputs: "Zapisywanie",
+  completed: "Gotowe",
+  failed: "Błąd",
+  cancelled: "Anulowano",
+  timeout: "Timeout",
+};
+
+/** @type {{tabId:number, domain:string, url:string, config: import('../lib/schema.js').ScraperConfig, projectId: string|null, scanning: boolean, scanProducts: any[], adapterRows: any[]|null, outputDirHandle: any, openai: {apiKey:string, model:string}, bridge: {baseUrl:string, connected:boolean, jobId:string|null}}} */
+const state = {
+  tabId: null,
+  domain: "",
+  url: "",
+  config: null,
+  projectId: null,
+  scanning: false,
+  scanProducts: [],
+  adapterRows: null,
+  outputDirHandle: null,
+  openai: { apiKey: "", model: "" },
+  bridge: { baseUrl: "http://127.0.0.1:8765", connected: false, jobId: null },
+};
 
 function log(message) {
   const box = el("log-output");
@@ -54,6 +80,16 @@ function setExportButtonsDisabled(disabled) {
   for (const id of ["export-excel-btn", "export-csv-btn", "export-json-preview-btn", "export-images-btn"]) {
     el(id).disabled = disabled;
   }
+}
+
+function bridgeClient() {
+  return createBridgeClient(state.bridge.baseUrl || "http://127.0.0.1:8765");
+}
+
+function setBridgeStatus(text, kind = "idle") {
+  const label = el("bridge-status-label");
+  label.textContent = text;
+  label.dataset.kind = kind;
 }
 
 function imageColumnsFromFallbackRows(fallbackRows) {
@@ -657,6 +693,133 @@ async function onExportImages() {
   }
 }
 
+// --- pełny eksport przez framework/bridge -----------------------------------------
+
+function renderFrameworkOutputs(outputs) {
+  const box = el("framework-outputs");
+  box.innerHTML = "";
+  const groups = [
+    ["CSV", outputs?.csv || []],
+    ["Excel", outputs?.excel || []],
+  ];
+  for (const [label, files] of groups) {
+    const line = document.createElement("div");
+    line.textContent = files.length
+      ? `${label}: ${files.map((file) => file.path || file.name).join(", ")}`
+      : `${label}: brak plików`;
+    box.appendChild(line);
+  }
+  const images = document.createElement("div");
+  images.textContent = (outputs?.image_dirs || []).length
+    ? `Zdjęcia: ${(outputs.image_dirs || []).join(", ")}`
+    : "Zdjęcia: brak folderów";
+  box.appendChild(images);
+  if (outputs?.note) {
+    const note = document.createElement("div");
+    note.textContent = outputs.note;
+    box.appendChild(note);
+  }
+  box.hidden = false;
+}
+
+async function saveBridgeSettingsFromForm() {
+  const baseUrl = el("bridge-base-url-input").value.trim() || "http://127.0.0.1:8765";
+  state.bridge.baseUrl = baseUrl;
+  await saveBridgeSettings({ baseUrl });
+}
+
+async function onCheckBridge() {
+  await saveBridgeSettingsFromForm();
+  const progress = el("framework-job-progress");
+  progress.textContent = "Framework: sprawdzanie połączenia…";
+  try {
+    const health = await bridgeClient().health();
+    state.bridge.connected = health.status === "ok";
+    if (state.bridge.connected) {
+      setBridgeStatus("połączony", "ok");
+      progress.textContent = "Framework: połączony";
+      toast("Framework połączony");
+      return true;
+    }
+    setBridgeStatus("problem", "err");
+    progress.textContent = `Framework: ${health.issues?.join("; ") || "status degraded"}`;
+    return false;
+  } catch (err) {
+    state.bridge.connected = false;
+    setBridgeStatus("offline", "err");
+    progress.textContent = "Framework: offline";
+    toast(String(err.message || err), "err");
+    log(`Błąd bridge'a: ${err.message || err}`);
+    return false;
+  }
+}
+
+async function pushCurrentConfigToBridge(client) {
+  readFormIntoConfig();
+  await saveConfig(state.config);
+  const project = await client.createProject({
+    domain: state.config.domain,
+    start_url: state.config.start_url,
+    mode: state.config.mode,
+    source_name: state.config.source.name,
+  });
+  state.projectId = project.id;
+  await client.pushConfig(project.id, state.config);
+  return project;
+}
+
+async function pollFrameworkJob(client, jobId) {
+  const progress = el("framework-job-progress");
+  let lastJob = null;
+  for (let attempt = 0; attempt < 240; attempt += 1) {
+    lastJob = await client.job(jobId);
+    const label = JOB_STATUS_LABELS[lastJob.status] || lastJob.status;
+    progress.textContent = `Framework: ${label}`;
+    setBridgeStatus(label.toLowerCase(), lastJob.status === "failed" ? "err" : "ok");
+    if (JOB_DONE_STATUSES.has(lastJob.status)) break;
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+  }
+  if (!lastJob || !JOB_DONE_STATUSES.has(lastJob.status)) {
+    throw new Error("Timeout oczekiwania na job frameworka");
+  }
+  if (lastJob.status !== "completed") {
+    const logs = await client.jobLogs(jobId).catch(() => ({ log_tail: "" }));
+    throw new Error(lastJob.error_message || logs.log_tail || `Job zakończył się statusem ${lastJob.status}`);
+  }
+  const outputs = await client.jobOutputs(jobId);
+  renderFrameworkOutputs(outputs);
+  progress.textContent = `Framework: gotowe, job ${jobId}`;
+}
+
+async function onFrameworkExport() {
+  const btn = el("framework-export-btn");
+  const outputsBox = el("framework-outputs");
+  btn.disabled = true;
+  outputsBox.hidden = true;
+  try {
+    if (!(await ensureScanResults())) return;
+    await saveBridgeSettingsFromForm();
+    const client = bridgeClient();
+    const connected = await onCheckBridge();
+    if (!connected) return;
+
+    el("framework-job-progress").textContent = "Framework: wysyłanie konfiguracji…";
+    const project = await pushCurrentConfigToBridge(client);
+    el("framework-job-progress").textContent = "Framework: start joba…";
+    const job = await client.startJob(project.id, ["csv", "excel"]);
+    state.bridge.jobId = job.id;
+    log(`Uruchomiono job frameworka: ${job.id}`);
+    await pollFrameworkJob(client, job.id);
+    toast("Pełny eksport zakończony");
+  } catch (err) {
+    setBridgeStatus("błąd", "err");
+    toast(String(err.message || err), "err");
+    log(`Błąd pełnego eksportu: ${err.message || err}`);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 /** Odświeża hero-checkbox "Użyj AI" + etykietę wg stanu state.openai (klucz z chrome.storage.local). */
 function refreshAiStatusUi() {
   const label = el("ai-status-label");
@@ -740,11 +903,18 @@ async function init() {
   state.outputDirHandle = await fsdir.restoreOutputDir();
   updateFolderLabel();
 
+  const bridgeSettings = await loadBridgeSettings();
+  state.bridge.baseUrl = bridgeSettings.baseUrl || "http://127.0.0.1:8765";
+  el("bridge-base-url-input").value = state.bridge.baseUrl;
+
   await loadAiSettingsIntoUi();
   el("save-ai-settings-btn").addEventListener("click", onSaveAiSettings);
   el("clear-ai-settings-btn").addEventListener("click", onClearAiSettings);
   el("openai-api-key-input").addEventListener("change", onApiKeyInputChange);
   el("image-base-url-input").addEventListener("change", onImageDomainChange);
+  el("bridge-base-url-input").addEventListener("change", saveBridgeSettingsFromForm);
+  el("check-bridge-btn").addEventListener("click", onCheckBridge);
+  el("framework-export-btn").addEventListener("click", onFrameworkExport);
 
   el("scan-btn").addEventListener("click", onScanCatalog);
   el("stop-scan-btn").addEventListener("click", onStopScan);

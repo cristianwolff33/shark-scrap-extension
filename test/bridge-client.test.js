@@ -56,6 +56,34 @@ test("createBridgeClient zachowuje stare endpointy bridge'a", async () => {
   assert.equal(calls[7].url, "http://localhost:8765/projects");
 });
 
+test("createBridgeClient obsługuje cloud auth i billing endpointy", async () => {
+  const calls = [];
+  const fetchImpl = async (url, opts = {}) => {
+    calls.push({ url, opts });
+    return { ok: true, status: 200, text: async () => "{}" };
+  };
+  const client = createBridgeClient("http://127.0.0.1:8766", fetchImpl, {
+    headers: { "X-Shark-User-Id": "alice" },
+    serviceName: "cloud API",
+  });
+
+  await client.me();
+  await client.billingPlans();
+  await client.billingStatus();
+  await client.checkoutSession("pro");
+
+  assert.equal(calls[0].url, "http://127.0.0.1:8766/me");
+  assert.equal(calls[1].url, "http://127.0.0.1:8766/billing/plans");
+  assert.equal(calls[2].url, "http://127.0.0.1:8766/billing/status");
+  assert.equal(calls[3].url, "http://127.0.0.1:8766/billing/checkout-session");
+  assert.equal(calls[3].opts.method, "POST");
+  assert.deepEqual(JSON.parse(calls[3].opts.body), { plan: "pro" });
+  for (const call of calls) {
+    assert.equal(call.opts.headers["X-Shark-User-Id"], "alice");
+    assert.equal(call.opts.headers["Content-Type"], "application/json");
+  }
+});
+
 test("createBridgeClient zgłasza czytelny błąd z bridge'a", async () => {
   const fetchImpl = async () => ({
     ok: false,
@@ -69,4 +97,3 @@ test("createBridgeClient zgłasza czytelny błąd z bridge'a", async () => {
     (err) => err instanceof BridgeError && err.status === 400 && /konfiguracji/.test(err.message)
   );
 });
-

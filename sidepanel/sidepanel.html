@@ -66,13 +66,31 @@
         <div class="framework-head">
           <div>
             <span>Pełny eksport</span>
-            <strong>Framework</strong>
+            <strong id="framework-mode-title">Framework</strong>
           </div>
           <button id="check-bridge-btn" type="button" class="settings-btn ghost">Sprawdź</button>
         </div>
-        <label class="domain-form framework-url-field">
-          <span>API frameworka</span>
+        <div class="runtime-switch" role="radiogroup" aria-label="Tryb API">
+          <label>
+            <input id="framework-mode-local" type="radio" name="framework-mode" value="local" checked />
+            <span>Local</span>
+          </label>
+          <label>
+            <input id="framework-mode-cloud" type="radio" name="framework-mode" value="cloud" />
+            <span>Cloud</span>
+          </label>
+        </div>
+        <label id="local-api-field" class="domain-form framework-url-field runtime-field">
+          <span>Local API</span>
           <input id="bridge-base-url-input" type="text" placeholder="http://127.0.0.1:8765" autocomplete="off" />
+        </label>
+        <label id="cloud-api-field" class="domain-form framework-url-field runtime-field" hidden>
+          <span>Cloud API</span>
+          <input id="cloud-base-url-input" type="text" placeholder="http://127.0.0.1:8766" autocomplete="off" />
+        </label>
+        <label id="cloud-user-field" class="domain-form framework-url-field runtime-field" hidden>
+          <span>Dev user</span>
+          <input id="cloud-user-id-input" type="text" placeholder="dev-user" autocomplete="off" />
         </label>
         <button id="framework-export-btn" type="button" class="framework-btn">
           <span>Uruchom pełny eksport</span>

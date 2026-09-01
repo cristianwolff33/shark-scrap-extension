@@ -37,7 +37,7 @@ const JOB_STATUS_LABELS = {
   timeout: "Timeout",
 };
 
-/** @type {{tabId:number, domain:string, url:string, config: import('../lib/schema.js').ScraperConfig, projectId: string|null, scanning: boolean, scanProducts: any[], adapterRows: any[]|null, outputDirHandle: any, openai: {apiKey:string, model:string}, bridge: {baseUrl:string, connected:boolean, jobId:string|null}}} */
+/** @type {{tabId:number, domain:string, url:string, config: import('../lib/schema.js').ScraperConfig, projectId: string|null, scanning: boolean, scanProducts: any[], adapterRows: any[]|null, outputDirHandle: any, openai: {apiKey:string, model:string}, bridge: {mode:string, baseUrl:string, localBaseUrl:string, cloudBaseUrl:string, cloudUserId:string, connected:boolean, jobId:string|null}}} */
 const state = {
   tabId: null,
   domain: "",
@@ -49,7 +49,15 @@ const state = {
   adapterRows: null,
   outputDirHandle: null,
   openai: { apiKey: "", model: "" },
-  bridge: { baseUrl: "http://127.0.0.1:8765", connected: false, jobId: null },
+  bridge: {
+    mode: "local",
+    baseUrl: "http://127.0.0.1:8765",
+    localBaseUrl: "http://127.0.0.1:8765",
+    cloudBaseUrl: "http://127.0.0.1:8766",
+    cloudUserId: "dev-user",
+    connected: false,
+    jobId: null,
+  },
 };
 
 function log(message) {
@@ -82,8 +90,28 @@ function setExportButtonsDisabled(disabled) {
   }
 }
 
+function isCloudMode() {
+  return state.bridge.mode === "cloud";
+}
+
+function frameworkLabel() {
+  return isCloudMode() ? "Cloud" : "Framework";
+}
+
+function currentFrameworkBaseUrl() {
+  if (isCloudMode()) return state.bridge.cloudBaseUrl || "http://127.0.0.1:8766";
+  return state.bridge.localBaseUrl || state.bridge.baseUrl || "http://127.0.0.1:8765";
+}
+
+function currentFrameworkHeaders() {
+  return isCloudMode() ? { "X-Shark-User-Id": state.bridge.cloudUserId || "dev-user" } : {};
+}
+
 function bridgeClient() {
-  return createBridgeClient(state.bridge.baseUrl || "http://127.0.0.1:8765");
+  return createBridgeClient(currentFrameworkBaseUrl(), fetch, {
+    headers: currentFrameworkHeaders(),
+    serviceName: isCloudMode() ? "cloud API" : "bridgem",
+  });
 }
 
 function setBridgeStatus(text, kind = "idle") {
@@ -697,7 +725,7 @@ async function onExportImages() {
 
 function bridgeDownloadHref(downloadUrl) {
   if (!downloadUrl) return "";
-  return new URL(downloadUrl, state.bridge.baseUrl || "http://127.0.0.1:8765").href;
+  return new URL(downloadUrl, currentFrameworkBaseUrl()).href;
 }
 
 function appendFrameworkOutputGroup(box, label, files) {
@@ -756,34 +784,74 @@ function renderFrameworkOutputs(outputs) {
   box.hidden = false;
 }
 
+function syncFrameworkModeUi() {
+  const cloud = isCloudMode();
+  el("framework-mode-local").checked = !cloud;
+  el("framework-mode-cloud").checked = cloud;
+  el("framework-mode-title").textContent = cloud ? "Cloud" : "Framework";
+  el("local-api-field").hidden = cloud;
+  el("cloud-api-field").hidden = !cloud;
+  el("cloud-user-field").hidden = !cloud;
+  el("bridge-base-url-input").value = state.bridge.localBaseUrl || "http://127.0.0.1:8765";
+  el("cloud-base-url-input").value = state.bridge.cloudBaseUrl || "http://127.0.0.1:8766";
+  el("cloud-user-id-input").value = state.bridge.cloudUserId || "dev-user";
+  const modeText = cloud ? "Cloud: nie sprawdzono połączenia" : "Framework: nie sprawdzono połączenia";
+  if (!state.bridge.connected && !state.bridge.jobId) {
+    el("framework-job-progress").textContent = modeText;
+    setBridgeStatus("nie sprawdzono", "idle");
+  }
+}
+
 async function saveBridgeSettingsFromForm() {
-  const baseUrl = el("bridge-base-url-input").value.trim() || "http://127.0.0.1:8765";
-  state.bridge.baseUrl = baseUrl;
-  await saveBridgeSettings({ baseUrl });
+  state.bridge.mode = el("framework-mode-cloud").checked ? "cloud" : "local";
+  state.bridge.localBaseUrl = el("bridge-base-url-input").value.trim() || "http://127.0.0.1:8765";
+  state.bridge.cloudBaseUrl = el("cloud-base-url-input").value.trim() || "http://127.0.0.1:8766";
+  state.bridge.cloudUserId = el("cloud-user-id-input").value.trim() || "dev-user";
+  state.bridge.baseUrl = currentFrameworkBaseUrl();
+  state.bridge.connected = false;
+  state.bridge.jobId = null;
+  el("framework-outputs").hidden = true;
+  syncFrameworkModeUi();
+  await saveBridgeSettings({
+    mode: state.bridge.mode,
+    localBaseUrl: state.bridge.localBaseUrl,
+    cloudBaseUrl: state.bridge.cloudBaseUrl,
+    cloudUserId: state.bridge.cloudUserId,
+  });
 }
 
 async function onCheckBridge() {
   await saveBridgeSettingsFromForm();
   const progress = el("framework-job-progress");
-  progress.textContent = "Framework: sprawdzanie połączenia…";
+  const label = frameworkLabel();
+  progress.textContent = `${label}: sprawdzanie połączenia…`;
   try {
-    const health = await bridgeClient().health();
+    const client = bridgeClient();
+    const health = await client.health();
     state.bridge.connected = health.status === "ok";
     if (state.bridge.connected) {
+      if (isCloudMode()) {
+        const me = await client.me();
+        const billing = await client.billingStatus();
+        setBridgeStatus(`${billing.plan} ${billing.jobs_used}/${billing.jobs_limit}`, billing.can_create_job ? "ok" : "err");
+        progress.textContent = `Cloud: ${me.id}, plan ${billing.plan}, joby ${billing.jobs_used}/${billing.jobs_limit}`;
+        toast("Cloud API połączone");
+        return true;
+      }
       setBridgeStatus("połączony", "ok");
       progress.textContent = "Framework: połączony";
       toast("Framework połączony");
       return true;
     }
     setBridgeStatus("problem", "err");
-    progress.textContent = `Framework: ${health.issues?.join("; ") || "status degraded"}`;
+    progress.textContent = `${label}: ${health.issues?.join("; ") || "status degraded"}`;
     return false;
   } catch (err) {
     state.bridge.connected = false;
     setBridgeStatus("offline", "err");
-    progress.textContent = "Framework: offline";
+    progress.textContent = `${label}: offline`;
     toast(String(err.message || err), "err");
-    log(`Błąd bridge'a: ${err.message || err}`);
+    log(`Błąd API pełnego eksportu: ${err.message || err}`);
     return false;
   }
 }
@@ -825,6 +893,23 @@ async function pollFrameworkJob(client, jobId) {
   progress.textContent = `Framework: gotowe, job ${jobId}`;
 }
 
+async function confirmCloudJobQueued(client, jobId) {
+  const progress = el("framework-job-progress");
+  const job = await client.job(jobId);
+  const label = JOB_STATUS_LABELS[job.status] || job.status;
+  const outputs = await client.jobOutputs(jobId);
+  renderFrameworkOutputs(outputs);
+  const billing = await client.billingStatus().catch(() => null);
+  if (billing) {
+    setBridgeStatus(`${billing.plan} ${billing.jobs_used}/${billing.jobs_limit}`, billing.can_create_job ? "ok" : "err");
+    progress.textContent = `Cloud: ${label}, joby ${billing.jobs_used}/${billing.jobs_limit}`;
+  } else {
+    setBridgeStatus(label.toLowerCase(), "ok");
+    progress.textContent = `Cloud: ${label}`;
+  }
+  return job;
+}
+
 async function onFrameworkExport() {
   const btn = el("framework-export-btn");
   const outputsBox = el("framework-outputs");
@@ -837,14 +922,20 @@ async function onFrameworkExport() {
     const connected = await onCheckBridge();
     if (!connected) return;
 
-    el("framework-job-progress").textContent = "Framework: wysyłanie konfiguracji…";
+    const label = frameworkLabel();
+    el("framework-job-progress").textContent = `${label}: wysyłanie konfiguracji…`;
     const project = await pushCurrentConfigToBridge(client);
-    el("framework-job-progress").textContent = "Framework: start joba…";
+    el("framework-job-progress").textContent = `${label}: start joba…`;
     const job = await client.startJob(project.id, ["csv", "excel"]);
     state.bridge.jobId = job.id;
-    log(`Uruchomiono job frameworka: ${job.id}`);
-    await pollFrameworkJob(client, job.id);
-    toast("Pełny eksport zakończony");
+    log(`Uruchomiono job ${isCloudMode() ? "cloud" : "frameworka"}: ${job.id}`);
+    if (isCloudMode()) {
+      await confirmCloudJobQueued(client, job.id);
+      toast("Job cloud utworzony");
+    } else {
+      await pollFrameworkJob(client, job.id);
+      toast("Pełny eksport zakończony");
+    }
   } catch (err) {
     setBridgeStatus("błąd", "err");
     toast(String(err.message || err), "err");
@@ -938,8 +1029,13 @@ async function init() {
   updateFolderLabel();
 
   const bridgeSettings = await loadBridgeSettings();
-  state.bridge.baseUrl = bridgeSettings.baseUrl || "http://127.0.0.1:8765";
-  el("bridge-base-url-input").value = state.bridge.baseUrl;
+  state.bridge = {
+    ...state.bridge,
+    ...bridgeSettings,
+    connected: false,
+    jobId: null,
+  };
+  syncFrameworkModeUi();
 
   await loadAiSettingsIntoUi();
   el("save-ai-settings-btn").addEventListener("click", onSaveAiSettings);
@@ -947,6 +1043,10 @@ async function init() {
   el("openai-api-key-input").addEventListener("change", onApiKeyInputChange);
   el("image-base-url-input").addEventListener("change", onImageDomainChange);
   el("bridge-base-url-input").addEventListener("change", saveBridgeSettingsFromForm);
+  el("cloud-base-url-input").addEventListener("change", saveBridgeSettingsFromForm);
+  el("cloud-user-id-input").addEventListener("change", saveBridgeSettingsFromForm);
+  el("framework-mode-local").addEventListener("change", saveBridgeSettingsFromForm);
+  el("framework-mode-cloud").addEventListener("change", saveBridgeSettingsFromForm);
   el("check-bridge-btn").addEventListener("click", onCheckBridge);
   el("framework-export-btn").addEventListener("click", onFrameworkExport);
 

@@ -802,15 +802,18 @@ function syncFrameworkModeUi() {
   }
 }
 
-async function saveBridgeSettingsFromForm() {
+async function saveBridgeSettingsFromForm(options = {}) {
+  const resetJob = options?.resetJob !== false;
   state.bridge.mode = el("framework-mode-cloud").checked ? "cloud" : "local";
   state.bridge.localBaseUrl = el("bridge-base-url-input").value.trim() || "http://127.0.0.1:8765";
   state.bridge.cloudBaseUrl = el("cloud-base-url-input").value.trim() || "http://127.0.0.1:8766";
   state.bridge.cloudUserId = el("cloud-user-id-input").value.trim() || "dev-user";
   state.bridge.baseUrl = currentFrameworkBaseUrl();
   state.bridge.connected = false;
-  state.bridge.jobId = null;
-  el("framework-outputs").hidden = true;
+  if (resetJob) {
+    state.bridge.jobId = null;
+    el("framework-outputs").hidden = true;
+  }
   syncFrameworkModeUi();
   await saveBridgeSettings({
     mode: state.bridge.mode,
@@ -821,7 +824,7 @@ async function saveBridgeSettingsFromForm() {
 }
 
 async function onCheckBridge() {
-  await saveBridgeSettingsFromForm();
+  await saveBridgeSettingsFromForm({ resetJob: false });
   const progress = el("framework-job-progress");
   const label = frameworkLabel();
   progress.textContent = `${label}: sprawdzanie połączenia…`;
@@ -893,19 +896,31 @@ async function pollFrameworkJob(client, jobId) {
   progress.textContent = `Framework: gotowe, job ${jobId}`;
 }
 
-async function confirmCloudJobQueued(client, jobId) {
+async function pollCloudJob(client, jobId) {
   const progress = el("framework-job-progress");
-  const job = await client.job(jobId);
-  const label = JOB_STATUS_LABELS[job.status] || job.status;
+  let job = null;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    job = await client.job(jobId);
+    const label = JOB_STATUS_LABELS[job.status] || job.status;
+    progress.textContent = `Cloud: ${label}`;
+    setBridgeStatus(label.toLowerCase(), job.status === "failed" ? "err" : "ok");
+    if (JOB_DONE_STATUSES.has(job.status)) break;
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+  }
+  if (!job) throw new Error("Cloud job nie został znaleziony");
   const outputs = await client.jobOutputs(jobId);
   renderFrameworkOutputs(outputs);
   const billing = await client.billingStatus().catch(() => null);
+  const label = JOB_STATUS_LABELS[job.status] || job.status;
   if (billing) {
     setBridgeStatus(`${billing.plan} ${billing.jobs_used}/${billing.jobs_limit}`, billing.can_create_job ? "ok" : "err");
     progress.textContent = `Cloud: ${label}, joby ${billing.jobs_used}/${billing.jobs_limit}`;
   } else {
     setBridgeStatus(label.toLowerCase(), "ok");
     progress.textContent = `Cloud: ${label}`;
+  }
+  if (job.status !== "completed" && JOB_DONE_STATUSES.has(job.status)) {
+    throw new Error(job.error_message || `Cloud job zakończył się statusem ${job.status}`);
   }
   return job;
 }
@@ -930,8 +945,8 @@ async function onFrameworkExport() {
     state.bridge.jobId = job.id;
     log(`Uruchomiono job ${isCloudMode() ? "cloud" : "frameworka"}: ${job.id}`);
     if (isCloudMode()) {
-      await confirmCloudJobQueued(client, job.id);
-      toast("Job cloud utworzony");
+      const cloudJob = await pollCloudJob(client, job.id);
+      toast(cloudJob.status === "completed" ? "Job cloud zakończony" : "Job cloud utworzony");
     } else {
       await pollFrameworkJob(client, job.id);
       toast("Pełny eksport zakończony");

@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   resolveUrl,
+  normalizeCrawlUrl,
   dedupe,
   capArray,
   guessAdapterMode,
@@ -20,6 +21,11 @@ test("resolveUrl zwraca null zamiast rzucać na pustym/złym wejściu", () => {
   assert.equal(resolveUrl("", "https://sklep.pl/"), null);
   assert.equal(resolveUrl(null, "https://sklep.pl/"), null);
   assert.equal(resolveUrl("::::nie-url::::", "not a base at all"), null);
+});
+
+test("normalizeCrawlUrl usuwa hash, ale zostawia query do paginacji", () => {
+  assert.equal(normalizeCrawlUrl("https://sklep.pl/kategoria?page=2#products"), "https://sklep.pl/kategoria?page=2");
+  assert.equal(normalizeCrawlUrl("nie-url"), null);
 });
 
 test("dedupe zachowuje kolejność pierwszego wystąpienia i odrzuca puste", () => {

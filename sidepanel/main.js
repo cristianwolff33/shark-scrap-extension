@@ -245,7 +245,7 @@ function renderForm() {
   el("pagination-mode-select").value = c.list_page.pagination.mode;
   el("next-selector-input").value = c.list_page.pagination.next_selector || "";
   el("load-more-selector-input").value = c.list_page.pagination.load_more_selector || "";
-  el("max-pages-input").value = c.list_page.pagination.max_pages || 20;
+  el("max-pages-input").value = c.list_page.pagination.max_pages || 50;
 
   el("image-base-url-input").value = c.image_links.public_base_url || "";
   el("image-brand-input").value = c.image_links.brand_segment || "";
@@ -272,7 +272,7 @@ function readFormIntoConfig() {
     mode: pMode,
     next_selector: el("next-selector-input").value.trim(),
     load_more_selector: el("load-more-selector-input").value.trim(),
-    max_pages: Number(el("max-pages-input").value) || 20,
+    max_pages: Number(el("max-pages-input").value) || 50,
     experimental: pMode === "load_more" || pMode === "infinite_scroll",
   };
 
@@ -459,7 +459,8 @@ async function onScanCatalog() {
   el("scan-progress-text").textContent = "Wykrywanie listy i pól produktowych…";
 
   try {
-    const maxPages = Number(el("max-pages-input").value) || 20;
+    const maxPages = Number(el("max-pages-input").value) || 50;
+    const maxProducts = Number(el("max-products-input").value) || 500;
     const useAI = el("use-ai-checkbox").checked;
     const cloudAi = isCloudMode()
       ? { baseUrl: currentFrameworkBaseUrl(), headers: currentFrameworkHeaders() }
@@ -468,6 +469,7 @@ async function onScanCatalog() {
       action: "SCAN_CATALOG",
       options: {
         maxPages,
+        maxProducts,
         useAI,
         apiKey: isCloudMode() ? "" : state.openai.apiKey,
         aiModel: state.openai.model,

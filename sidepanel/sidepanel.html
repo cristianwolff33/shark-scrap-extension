@@ -27,6 +27,25 @@
         <small>Wynik: https://twojadomena.pl/produkty/[sku].[rozszerzenie]</small>
       </label>
 
+      <div class="scan-options" aria-label="Zakres skanu">
+        <label>
+          <span>Strony</span>
+          <input id="max-pages-input" type="number" min="1" max="250" value="50" />
+        </label>
+        <label>
+          <span>Produkty</span>
+          <input id="max-products-input" type="number" min="1" max="2000" value="500" />
+        </label>
+      </div>
+
+      <div class="scan-command-row">
+        <button id="scan-btn" type="button" class="scan-btn">
+          <span>Skanuj sklep</span>
+          <strong>Start</strong>
+        </button>
+        <button id="stop-scan-btn" type="button" class="settings-btn ghost" hidden>Stop</button>
+      </div>
+
       <details class="settings-drawer">
         <summary>
           <span>Codex connector</span>
@@ -134,8 +153,6 @@
     </section>
 
     <section class="app-hidden" aria-hidden="true">
-      <button id="scan-btn" type="button">Skanuj</button>
-      <button id="stop-scan-btn" type="button">Stop</button>
       <button id="change-folder-btn" type="button">Folder</button>
       <input type="checkbox" id="use-ai-checkbox" />
       <input id="image-brand-input" type="hidden" value="" />
@@ -150,7 +167,6 @@
       <input id="pagination-mode-select" type="hidden" value="none" />
       <input id="next-selector-input" type="hidden" />
       <input id="load-more-selector-input" type="hidden" />
-      <input id="max-pages-input" type="hidden" value="20" />
       <textarea id="notes-textarea"></textarea>
 
       <button id="detect-btn" type="button"></button>

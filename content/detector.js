@@ -26,6 +26,31 @@ function collectMetaPairs(doc = document) {
   ]);
 }
 
+function resolveMaybeUrl(value, baseUrl) {
+  if (!value) return value;
+  try {
+    return new URL(value, baseUrl).href;
+  } catch {
+    return value;
+  }
+}
+
+function normalizeUrlFields(fields, pageUrl) {
+  for (const [field, spec] of Object.entries(fields || {})) {
+    if (!spec) continue;
+    const attr = String(spec.attr || "").toLowerCase();
+    const looksLikeUrl = field === "images" || field === "product_url" || attr === "src" || attr === "href";
+    if (!looksLikeUrl) continue;
+    if (Array.isArray(spec.values)) {
+      spec.values = spec.values.map((value) => resolveMaybeUrl(value, pageUrl)).filter(Boolean);
+      if (spec.values.length > 0) spec.value = spec.values[0];
+    } else if (spec.value) {
+      spec.value = resolveMaybeUrl(spec.value, pageUrl);
+    }
+  }
+  return fields;
+}
+
 /** @param {Document} doc @param {string} pageUrl */
 async function detectProductFromDoc(doc, pageUrl) {
   const [{ detectFromJsonLd }, { detectFromMicrodata }, { mapOgTags }, { detectFromDom }, { mergeFieldSources }] = await Promise.all([
@@ -50,6 +75,8 @@ async function detectProductFromDoc(doc, pageUrl) {
     merged.product_url = { source: "canonical", attr: "href", multiple: false, value: pageUrl };
   }
 
+  normalizeUrlFields(merged, pageUrl);
+
   return {
     url: pageUrl,
     domain: (() => { try { return new URL(pageUrl).hostname; } catch { return ""; } })(),
@@ -62,9 +89,36 @@ async function detectProduct() {
   return detectProductFromDoc(document, location.href);
 }
 
+async function extractFieldsByMapFromDoc(doc, pageUrl, fieldMap) {
+  const { valueForAttr } = await loadLib("selectors.js");
+  const fields = {};
+  for (const [field, spec] of Object.entries(fieldMap || {})) {
+    if (!spec?.selector) continue;
+    if (!["css", "dom", "ai"].includes(spec.source)) continue;
+    try {
+      if (spec.multiple) {
+        const values = Array.from(doc.querySelectorAll(spec.selector))
+          .map((node) => valueForAttr(node, spec.attr))
+          .map((value) => String(value || "").trim())
+          .filter(Boolean);
+        if (values.length > 0) {
+          fields[field] = { ...spec, value: values.join(", "), values };
+        }
+      } else {
+        const node = doc.querySelector(spec.selector);
+        const value = node ? String(valueForAttr(node, spec.attr) || "").trim() : "";
+        if (value) fields[field] = { ...spec, value };
+      }
+    } catch {
+      // Selektor mógł być poprawny na próbce, ale nie na innej wersji szablonu produktu.
+    }
+  }
+  return normalizeUrlFields(fields, pageUrl);
+}
+
 /** Grupuje elementy strony wg sygnatury (tag + stabilna klasa) i szuka powtarzalnych "kart produktu". */
-async function detectListingFromDoc(doc) {
-  const [{ pickStableClass }, { groupSignature, pickBestGroup, PRICE_LIKE_RE }] = await Promise.all([
+async function detectListingFromDoc(doc, pageUrl = location.href) {
+  const [{ pickStableClass }, { groupSignature, pickBestGroup, pickBestProductLinkCandidate, PRICE_LIKE_RE }] = await Promise.all([
     loadLib("selectors.js"),
     loadLib("listing.js"),
   ]);
@@ -99,10 +153,13 @@ async function detectListingFromDoc(doc) {
 
   const group = descriptors.find((d) => d.selector === best.selector);
   const firstLink = group._els[0].querySelector("a[href]");
-  const urlSelector = firstLink ? "a" : "";
+  const urlSelector = firstLink ? "a[href]" : "";
   const sampleUrls = group._els
     .slice(0, 5)
-    .map((el) => el.querySelector("a[href]")?.href)
+    .map((el) => {
+      const link = pickProductLinkFromCard(el, urlSelector, "href", PRICE_LIKE_RE, pickBestProductLinkCandidate);
+      return resolveMaybeUrl(link?.raw || link?.href, pageUrl);
+    })
     .filter(Boolean);
 
   return {
@@ -155,37 +212,146 @@ async function detectPagination() {
 
 let scanStopRequested = false;
 
-function extractItemUrlsFromDoc(doc, itemSelector, urlSelector, urlAttribute, baseUrl, resolveUrl) {
+function pickProductLinkFromCard(card, urlSelector, urlAttribute, priceLikeRe, pickBestProductLinkCandidate) {
+  const selected = urlSelector ? Array.from(card.querySelectorAll(urlSelector)) : [];
+  const anchors = [];
+  for (const node of selected.length ? selected : [card]) {
+    if (node.matches?.("a[href]")) anchors.push(node);
+    if (node.querySelectorAll) anchors.push(...Array.from(node.querySelectorAll("a[href]")));
+  }
+  if (!anchors.length && card.querySelectorAll) anchors.push(...Array.from(card.querySelectorAll("a[href]")));
+  const unique = Array.from(new Set(anchors));
+  const hasPriceNearby = priceLikeRe.test(card.textContent || "");
+  const candidates = unique.map((el) => {
+    const attr = urlAttribute || "href";
+    const raw = attr === "text" ? el.textContent : el.getAttribute(attr);
+    return {
+      el,
+      raw,
+      href: el.getAttribute("href") || raw || "",
+      text: (el.textContent || "").trim(),
+      hasImage: !!el.querySelector("img"),
+      hasPriceNearby,
+    };
+  });
+  return pickBestProductLinkCandidate(candidates);
+}
+
+function extractItemUrlsFromDoc(doc, itemSelector, urlSelector, urlAttribute, baseUrl, resolveUrl, priceLikeRe, pickBestProductLinkCandidate) {
   if (!itemSelector) return [];
   const cards = Array.from(doc.querySelectorAll(itemSelector));
   const urls = [];
   for (const card of cards) {
-    const linkEl = urlSelector ? card.querySelector(urlSelector) : card.matches("a") ? card : card.querySelector("a");
-    if (!linkEl) continue;
-    const raw = urlAttribute && urlAttribute !== "text" ? linkEl.getAttribute(urlAttribute) : linkEl.textContent;
-    const abs = resolveUrl(raw, baseUrl);
+    const link = pickProductLinkFromCard(card, urlSelector, urlAttribute, priceLikeRe, pickBestProductLinkCandidate);
+    const abs = resolveUrl(link?.raw || link?.href, baseUrl);
     if (abs) urls.push(abs);
   }
   return urls;
 }
 
-function findNextUrlFromDoc(doc, pagination, baseUrl, resolveUrl) {
-  if (!pagination || pagination.mode !== "next_link" || !pagination.next_selector) return null;
+function extractLikelyProductUrlsFromDoc(doc, baseUrl, resolveUrl, priceLikeRe, scoreProductLinkCandidate) {
+  const anchors = Array.from(doc.querySelectorAll("a[href]"));
+  const candidates = anchors.map((el) => {
+    let node = el.parentElement;
+    let hasPriceNearby = priceLikeRe.test(el.textContent || "");
+    for (let depth = 0; node && depth < 4 && !hasPriceNearby; depth += 1) {
+      hasPriceNearby = priceLikeRe.test(node.textContent || "");
+      node = node.parentElement;
+    }
+    return {
+      el,
+      raw: el.getAttribute("href"),
+      href: el.getAttribute("href") || "",
+      text: (el.textContent || "").trim(),
+      hasImage: !!el.querySelector("img"),
+      hasPriceNearby,
+    };
+  });
+  return candidates
+    .filter((candidate) => scoreProductLinkCandidate(candidate) >= 45)
+    .map((candidate) => resolveUrl(candidate.raw, baseUrl))
+    .filter(Boolean);
+}
+
+function isSameListingAreaUrl(url, baseUrl) {
   try {
-    const el = doc.querySelector(pagination.next_selector);
-    if (!el) return null;
-    const href = el.getAttribute("href");
-    return resolveUrl(href, baseUrl);
+    const target = new URL(url);
+    const base = new URL(baseUrl);
+    if (target.origin !== base.origin) return false;
+    if (target.pathname === base.pathname) return true;
+    const basePath = base.pathname.replace(/\/+$/, "");
+    const targetPath = target.pathname.replace(/\/+$/, "");
+    if (basePath && targetPath.startsWith(`${basePath}/`)) return true;
+    const [baseFirst] = base.pathname.split("/").filter(Boolean);
+    const [targetFirst] = target.pathname.split("/").filter(Boolean);
+    return !!baseFirst && baseFirst === targetFirst;
   } catch {
-    return null; // niepoprawny selektor (np. strona 2 ma inny DOM niż strona 1) — kończymy paginację
+    return false;
   }
 }
 
-async function fetchDoc(url) {
-  const res = await fetch(url, { credentials: "same-origin" });
-  if (!res.ok) throw new Error(`HTTP ${res.status} dla ${url}`);
-  const html = await res.text();
-  return new DOMParser().parseFromString(html, "text/html");
+function isSameOriginUrl(url, baseUrl) {
+  try {
+    return new URL(url).origin === new URL(baseUrl).origin;
+  } catch {
+    return false;
+  }
+}
+
+function extractPaginationUrlsFromDoc(doc, pagination, currentUrl, baseUrl, resolveUrl, normalizeCrawlUrl, isLikelyPaginationLinkCandidate) {
+  const urls = [];
+  const add = (raw) => {
+    const abs = normalizeCrawlUrl(resolveUrl(raw, currentUrl));
+    if (!abs || abs === normalizeCrawlUrl(currentUrl) || !isSameListingAreaUrl(abs, baseUrl)) return;
+    urls.push(abs);
+  };
+
+  if (pagination?.mode === "next_link" && pagination.next_selector) {
+    try {
+      const next = doc.querySelector(pagination.next_selector);
+      if (next) add(next.getAttribute("href"));
+    } catch {
+      // Strona kolejna może mieć inny DOM niż pierwsza; wtedy szukamy linków paginacji niżej.
+    }
+  }
+
+  for (const a of Array.from(doc.querySelectorAll("a[href]"))) {
+    if (a.closest?.("[disabled], [aria-disabled='true'], .disabled")) continue;
+    const candidate = {
+      href: a.getAttribute("href") || "",
+      text: (a.textContent || "").trim(),
+      ariaLabel: a.getAttribute("aria-label") || "",
+      rel: a.getAttribute("rel") || "",
+      hasHref: true,
+    };
+    if (isLikelyPaginationLinkCandidate(candidate)) add(candidate.href);
+  }
+  return Array.from(new Set(urls));
+}
+
+async function fetchDoc(url, { retries = 1, timeoutMs = 15_000 } = {}) {
+  let lastError = null;
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await fetch(url, {
+        credentials: "include",
+        cache: "no-store",
+        redirect: "follow",
+        signal: controller.signal,
+      });
+      clearTimeout(timer);
+      if (!res.ok) throw new Error(`HTTP ${res.status} dla ${url}`);
+      const html = await res.text();
+      return new DOMParser().parseFromString(html, "text/html");
+    } catch (err) {
+      clearTimeout(timer);
+      lastError = err;
+      if (attempt < retries) await sleep(500 * (attempt + 1));
+    }
+  }
+  throw lastError || new Error(`Nie udało się pobrać ${url}`);
 }
 
 function sleep(ms) {
@@ -208,7 +374,7 @@ function sendProduct(product) {
   }
 }
 
-const HARD_PRODUCT_CAP = 500;
+const HARD_PRODUCT_CAP = 2000;
 const REQUEST_DELAY_MS = 350; // uprzejmość wobec serwera sklepu — ten sam rząd wielkości co request_delay_seconds frameworka
 
 /**
@@ -234,7 +400,8 @@ async function suggestMissingFieldsWithAi({ apiKey, aiModel, aiProvider, cloudAi
 
 async function scanCatalog({ maxPages, maxProducts, useAI, apiKey, aiModel, aiProvider, cloudAi } = {}) {
   scanStopRequested = false;
-  const { resolveUrl, dedupe, capArray, guessAdapterMode, isAutoFollowablePagination, pickBestSample } = await loadLib("crawler.js");
+  const { resolveUrl, normalizeCrawlUrl, dedupe, capArray, guessAdapterMode, isAutoFollowablePagination, pickBestSample } = await loadLib("crawler.js");
+  const { PRICE_LIKE_RE, pickBestProductLinkCandidate, scoreProductLinkCandidate, isLikelyPaginationLinkCandidate } = await loadLib("listing.js");
 
   const baseUrl = location.href;
   const listing = await detectListing();
@@ -261,39 +428,86 @@ async function scanCatalog({ maxPages, maxProducts, useAI, apiKey, aiModel, aiPr
   const productCap = Math.min(Number.isFinite(maxProducts) && maxProducts > 0 ? maxProducts : HARD_PRODUCT_CAP, HARD_PRODUCT_CAP);
 
   if (pagination.mode !== "none" && !isAutoFollowablePagination(pagination)) {
-    warnings.push(`Wykryto paginację typu "${pagination.mode}" (experimental) — auto-skan podąża tylko za "next link", więc pobrano tylko widoczne strony/produkty. Dociągnij resztę ręcznie albo v0.2.`);
+    warnings.push(`Wykryto paginację typu "${pagination.mode}" (experimental) — spróbuję jeszcze linki z href/numery stron, ale przyciski wymagające JS mogą wymagać trybu Playwright.`);
   }
 
-  // 1. Zbieramy URL-e produktów ze wszystkich stron listingu, którym możemy bezpiecznie podążyć.
-  let pageUrls = [baseUrl];
-  let currentDoc = document;
-  let currentUrl = baseUrl;
+  // 1. Zbieramy URL-e produktów ze stron listingu. Kolejka obsługuje next link oraz paginację
+  // numeryczną (?page=2, /page/2, /strona/2) wykrytą na każdej kolejnej stronie.
+  const baseKey = normalizeCrawlUrl(baseUrl);
+  const pendingPageUrls = [baseKey || baseUrl];
+  const visitedPageUrls = new Set();
   let pagesVisited = 0;
   let productUrls = [];
+  let queuedBeyondLimit = false;
 
-  while (pagesVisited < effectiveMaxPages && !scanStopRequested) {
+  while (pendingPageUrls.length > 0 && pagesVisited < effectiveMaxPages && !scanStopRequested) {
+    const currentUrl = pendingPageUrls.shift();
+    const currentKey = normalizeCrawlUrl(currentUrl);
+    if (!currentKey || visitedPageUrls.has(currentKey)) continue;
+    visitedPageUrls.add(currentKey);
+
+    let currentDoc = currentKey === baseKey ? document : null;
+    if (!currentDoc) {
+      await sleep(REQUEST_DELAY_MS);
+      try {
+        currentDoc = await fetchDoc(currentUrl);
+      } catch (err) {
+        warnings.push(`Nie udało się pobrać strony listingu ${currentUrl}: ${err.message || err}`);
+        continue;
+      }
+    }
+
     pagesVisited += 1;
-    const urlsOnPage = extractItemUrlsFromDoc(currentDoc, listing.item_selector, listing.url_selector, listing.url_attribute, currentUrl, resolveUrl);
-    productUrls.push(...urlsOnPage);
-    productUrls = dedupe(productUrls);
+    const urlsOnPage = extractItemUrlsFromDoc(
+      currentDoc,
+      listing.item_selector,
+      listing.url_selector,
+      listing.url_attribute,
+      currentUrl,
+      resolveUrl,
+      PRICE_LIKE_RE,
+      pickBestProductLinkCandidate
+    );
+    const fallbackUrlsOnPage = extractLikelyProductUrlsFromDoc(currentDoc, currentUrl, resolveUrl, PRICE_LIKE_RE, scoreProductLinkCandidate);
+    productUrls = dedupe(
+      [...productUrls, ...urlsOnPage, ...fallbackUrlsOnPage]
+        .map(normalizeCrawlUrl)
+        .filter((url) => url && isSameOriginUrl(url, baseUrl))
+    );
+
+    const nextPageUrls = extractPaginationUrlsFromDoc(
+      currentDoc,
+      pagination,
+      currentUrl,
+      baseUrl,
+      resolveUrl,
+      normalizeCrawlUrl,
+      isLikelyPaginationLinkCandidate
+    );
+    for (const url of nextPageUrls) {
+      if (visitedPageUrls.has(url) || pendingPageUrls.includes(url)) continue;
+      if (visitedPageUrls.size + pendingPageUrls.length >= effectiveMaxPages) {
+        queuedBeyondLimit = true;
+        continue;
+      }
+      pendingPageUrls.push(url);
+    }
+
     sendProgress({ phase: "listing", pagesVisited, pagesTotal: effectiveMaxPages, productsFound: productUrls.length });
 
     if (productUrls.length >= productCap) break;
-    if (!isAutoFollowablePagination(pagination)) break;
-
-    const nextUrl = findNextUrlFromDoc(currentDoc, pagination, currentUrl, resolveUrl);
-    if (!nextUrl || nextUrl === currentUrl) break;
-    await sleep(REQUEST_DELAY_MS);
-    try {
-      currentDoc = await fetchDoc(nextUrl);
-      currentUrl = nextUrl;
-    } catch (err) {
-      warnings.push(`Przerwano podążanie za paginacją: ${err.message || err}`);
-      break;
-    }
   }
 
   productUrls = capArray(dedupe(productUrls), productCap);
+  if (queuedBeyondLimit || pendingPageUrls.length > 0) {
+    warnings.push(`Skan zatrzymał się na limicie ${effectiveMaxPages} stron. Zwiększ "Max pages", jeśli kategoria ma więcej stron.`);
+  }
+  if (productUrls.length >= productCap) {
+    warnings.push(`Skan zatrzymał się na limicie ${productCap} produktów. Zwiększ limit po stronie skanera/backendu, jeśli chcesz pełny katalog.`);
+  }
+  if (productUrls.length === 0) {
+    warnings.push("Nie znaleziono URL-i produktów na listingu — selector kart lub linków prawdopodobnie wymaga ręcznej korekty.");
+  }
 
   // 2. Pola produktowe: detekcja na próbce (do 3 kart) — wygrywa najlepsza (najwięcej niepustych pól),
   //    potem to samo źródło pól stosujemy do KAŻDEGO produktu (jsonld/microdata path'y są strukturalne,
@@ -356,26 +570,33 @@ async function scanCatalog({ maxPages, maxProducts, useAI, apiKey, aiModel, aiPr
 
   // 3. Właściwe zbieranie danych z każdego produktu wg wykrytego field mapu.
   const products = [];
+  const failedProductErrors = [];
   let done = 0;
   for (const url of productUrls) {
     if (scanStopRequested) break;
     try {
       const doc = url === baseUrl ? document : await fetchDoc(url);
       const detected = await detectProductFromDoc(doc, url);
-      // Scalamy: wynik z samej strony produktu wygrywa (świeża detekcja), field mapa z próbki
-      // jest tylko rezerwą dla pól, których na tej konkretnej karcie nie udało się wykryć.
-      const merged = { ...fieldMap, ...detected.fields };
+      // Field mapa z próbki generalizuje selektory, ale wartości muszą pochodzić z aktualnego
+      // produktu. Świeża detekcja strony nadal wygrywa, bo zwykle ma JSON-LD/meta dla tej karty.
+      const mappedFields = await extractFieldsByMapFromDoc(doc, url, fieldMap);
+      const merged = { ...mappedFields, ...detected.fields };
       const record = { url, fields: merged, ok: true };
       products.push(record);
       sendProduct(record);
     } catch (err) {
       const record = { url, fields: {}, ok: false, error: String(err.message || err) };
       products.push(record);
+      failedProductErrors.push(record.error);
       sendProduct(record);
     }
     done += 1;
     sendProgress({ phase: "products", pagesVisited, pagesTotal: effectiveMaxPages, productsFound: done, productsTotal: productUrls.length });
     await sleep(REQUEST_DELAY_MS);
+  }
+  if (failedProductErrors.length > 0) {
+    const firstError = failedProductErrors[0];
+    warnings.push(`Nie udało się pobrać ${failedProductErrors.length}/${productUrls.length} produktów. Pierwszy błąd: ${firstError}`);
   }
 
   return {

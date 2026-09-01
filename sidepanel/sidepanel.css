@@ -165,6 +165,80 @@ h1 {
   font-weight: 600;
 }
 
+.scan-options {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.scan-options label {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.scan-options input {
+  width: 100%;
+  min-height: 38px;
+  border: 1px solid rgba(194, 232, 18, 0.28);
+  border-radius: 8px;
+  outline: none;
+  background: rgba(13, 4, 18, 0.72);
+  color: var(--text);
+  padding: 0 10px;
+  font-size: 13px;
+  font-weight: 850;
+}
+
+.scan-options input:focus {
+  border-color: var(--neon);
+  box-shadow: 0 0 0 3px rgba(194, 232, 18, 0.14);
+}
+
+.scan-command-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.scan-btn {
+  display: grid;
+  min-height: 44px;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid rgba(194, 232, 18, 0.45);
+  border-radius: 8px;
+  background: rgba(194, 232, 18, 0.12);
+  color: var(--text);
+  cursor: pointer;
+  padding: 0 12px;
+  text-align: left;
+}
+
+.scan-btn span {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.scan-btn strong {
+  color: var(--neon);
+  font-size: 13px;
+  font-weight: 950;
+}
+
+.scan-btn:disabled {
+  cursor: default;
+  opacity: 0.52;
+}
+
 .settings-drawer {
   position: relative;
   margin-bottom: 14px;

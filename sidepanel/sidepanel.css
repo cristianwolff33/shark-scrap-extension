@@ -85,6 +85,37 @@ textarea {
   margin-bottom: 18px;
 }
 
+.refresh-btn {
+  display: grid;
+  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  margin-left: auto;
+  border: 1px solid var(--soft);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 17px;
+  line-height: 1;
+  place-items: center;
+  transition: transform 200ms ease, border-color 120ms ease, color 120ms ease;
+}
+
+.refresh-btn:hover {
+  border-color: var(--neon);
+  color: var(--neon);
+}
+
+.refresh-btn:active {
+  transform: rotate(180deg);
+}
+
+.refresh-btn:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
 .brand-mark {
   display: grid;
   place-items: center;

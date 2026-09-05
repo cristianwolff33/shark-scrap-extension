@@ -199,6 +199,23 @@ async function sendToTab(tabId, message) {
   }
 }
 
+/** Odświeża kartę, na której user jest — przydatne np. po zmianie filtrów na stronie sklepu,
+ * przy podejrzeniu że coś się nie doładowało, albo przed nowym skanem tej samej strony.
+ * Zablokowane w trakcie skanu — reload zabiłby stan żywej strony (load-more/click_next/iframe),
+ * na którym auto-skan właśnie polega. */
+async function onRefreshTab() {
+  if (state.scanning) {
+    toast("Nie można odświeżyć strony w trakcie skanowania — najpierw kliknij Stop", "err");
+    return;
+  }
+  try {
+    await chrome.tabs.reload(state.tabId);
+    toast("Strona odświeżona");
+  } catch (err) {
+    toastError(err);
+  }
+}
+
 // --- render pól produktowych -----------------------------------------------------
 
 function fieldValuePreview(spec) {
@@ -468,6 +485,7 @@ async function onScanCatalog() {
   renderWarnings([]);
 
   el("scan-btn").disabled = true;
+  el("refresh-tab-btn").disabled = true;
   setExportButtonsDisabled(true);
   el("stop-scan-btn").hidden = false;
   el("scan-progress-wrap").hidden = false;
@@ -536,6 +554,7 @@ async function onScanCatalog() {
   } finally {
     state.scanning = false;
     el("scan-btn").disabled = false;
+    el("refresh-tab-btn").disabled = false;
     setExportButtonsDisabled(false);
     el("stop-scan-btn").hidden = true;
   }
@@ -1272,6 +1291,7 @@ async function init() {
   el("framework-outputs").addEventListener("click", onFrameworkOutputClick);
 
   el("scan-btn").addEventListener("click", onScanCatalog);
+  el("refresh-tab-btn").addEventListener("click", onRefreshTab);
   el("stop-scan-btn").addEventListener("click", onStopScan);
   el("change-folder-btn").addEventListener("click", onChangeFolder);
   el("export-excel-btn").addEventListener("click", onExportExcel);

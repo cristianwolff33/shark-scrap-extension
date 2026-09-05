@@ -1,7 +1,7 @@
 import { PRODUCT_FIELDS, createDefaultConfig, slugifyDomain } from "../lib/schema.js";
 import { createBridgeClient } from "../lib/bridge-client.js";
 import { loadBridgeSettings, loadConfig, saveBridgeSettings, saveConfig, loadAiSettings, saveAiSettings } from "../lib/storage.js";
-import { productsToAdapterRows, rowsToCsv, rowsToJsonBlob, rowsToXlsxBlob, imagesToZipBlob, slugifyBrand, normalizeImageTemplate } from "../lib/export.js";
+import { productsToAdapterRows, rowsToCsv, rowsToJsonBlob, rowsToXlsxBlob, imagesToZipBlob, filesToZipBlob, slugifyBrand, normalizeImageTemplate } from "../lib/export.js";
 import { generateAdapterRows as generateAdapterRowsCodex, DEFAULT_MODEL as CODEX_DEFAULT_MODEL } from "../lib/openai-client.js";
 import { generateAdapterRows as generateAdapterRowsClaude, DEFAULT_MODEL as CLAUDE_DEFAULT_MODEL } from "../lib/anthropic-client.js";
 import { formatScanProgress } from "../lib/crawler.js";
@@ -580,7 +580,7 @@ function updateFolderLabel() {
     ? `Folder wyjściowy: ${state.outputDirHandle.name}`
     : fsdir.isSupported()
       ? "Folder wyjściowy: nie wybrano (wybierzesz przy pierwszym pobraniu)"
-      : "Folder wyjściowy: przeglądarka nie pozwala wybrać folderu z poziomu rozszerzenia — pliki lądują w Pobrane/<nazwa-strony>/. Żeby trafiały na Pulpit, zmień domyślny folder pobierania Chrome (chrome://settings/downloads) na Pulpit.";
+      : "Folder wyjściowy: przeglądarka nie pozwala wybrać folderu z poziomu rozszerzenia — pojedyncze pliki (CSV/XLSX/JSON/zdjęcia) lądują płasko w Pobrane, a \"Download Full\" pobiera jeden ZIP z folderem <nazwa-strony> w środku. Żeby trafiały na Pulpit, zmień domyślny folder pobierania Chrome (chrome://settings/downloads) na Pulpit.";
 }
 
 /** Zwraca uchwyt do folderu wyjściowego — pyta usera TYLKO raz na sesję (potem z pamięci/IndexedDB). */
@@ -594,7 +594,7 @@ async function ensureOutputDir() {
 
 async function onChangeFolder() {
   if (!fsdir.isSupported()) {
-    toast("Przeglądarka nie pozwala wybrać folderu tutaj — pliki lądują w Pobrane/<nazwa-strony>/. Zmień domyślny folder pobierania Chrome na Pulpit, żeby trafiały tam.", "err");
+    toast("Przeglądarka nie pozwala wybrać folderu tutaj — użyj \"Download Full\", żeby dostać jeden ZIP z folderem <nazwa-strony> w środku, albo zmień domyślny folder pobierania Chrome na Pulpit.", "err");
     return;
   }
   try {
@@ -647,23 +647,26 @@ async function downloadBlobViaChrome(blob, filename) {
 }
 
 /**
- * Zapisuje Blob jako plik <folder wyjściowy>/<nazwa-strony>/<filename> — albo, gdy File System
- * Access jest niedostępny (typowe dla side panelu rozszerzenia — Chrome nie pozwala tam wywołać
- * showDirectoryPicker), przez chrome.downloads do Pobrane/<nazwa-strony>/<filename>. Celowo BEZ
- * dodatkowego folderu-wrappera (dawniej "scraper-client/") — dzięki temu, jeśli user ustawi w
- * Chrome domyślny folder pobierania na Pulpit (chrome://settings/downloads), foldery per-strona
- * lądują BEZPOŚREDNIO na Pulpicie, niezależnie czy klika CSV, XLSX, JSON czy Full — wszystkie
- * używają tego samego `domainSlug`, więc trafiają do tego samego folderu.
+ * Zapisuje Blob jako plik. Gdy File System Access jest dostępny (rzadkie w side panelu — Chrome
+ * zwykle nie pozwala tam wywołać showDirectoryPicker), ląduje w realnym folderze na dysku:
+ * <folder wyjściowy>/<nazwa-strony>/<filename>. W przeciwnym razie, przez chrome.downloads,
+ * ląduje PŁASKO w Pobrane/<filename> — CELOWO bez podfolderu zakodowanego w nazwie pobrania:
+ * na części systemów `chrome.downloads.download({filename: "podfolder/plik"})` z niejasnych
+ * powodów nie tworzy podfolderu tylko zapisuje plik pod losową, wygenerowaną nazwą. `filename`
+ * ma już domenę w sobie (patrz wywołania: `${domainSlug}.csv` itd.), więc user i tak łatwo
+ * rozpozna, do czego plik należy — grupowanie WIELU plików w jeden prawdziwy folder załatwia
+ * "Download Full" pakując wszystko do jednego ZIP-a (patrz onDownloadFull), co nie zależy od
+ * tego niepewnego mechanizmu.
  */
 async function writeOutput(filename, blob) {
-  const domainSlug = slugifyDomain(state.config.domain);
   if (fsdir.isSupported()) {
+    const domainSlug = slugifyDomain(state.config.domain);
     const dir = await ensureOutputDir();
     const domainDir = await fsdir.subdir(dir, domainSlug);
     await fsdir.writeFile(domainDir, filename, blob);
     return;
   }
-  await downloadBlobViaChrome(blob, `${domainSlug}/${filename}`);
+  await downloadBlobViaChrome(blob, filename);
 }
 
 async function ensureScanResults() {
@@ -777,13 +780,74 @@ async function runWithConcurrency(items, limit, worker) {
 }
 
 /**
- * Pobiera zdjęcia RÓWNOLEGLE (nie sekwencyjnie jak wcześniej) i — gdy przeglądarka nie wspiera
- * File System Access API (brak wyboru folderu, patrz fsdir.js) — pakuje je do JEDNEGO pliku ZIP
- * i pobiera go JEDNĄ operacją, zamiast N osobnych wpisów w chrome.downloads (denerwujące i wolne
- * przy dziesiątkach/setkach zdjęć). Gdy folder wyjściowy JEST dostępny, zapisujemy zdjęcia od razu
- * jako osobne pliki w realnym folderze — tam nic nie "zaśmieca" paska pobierania, więc paczkowanie
- * do ZIP-a byłoby zbędnym krokiem pośrednim.
+ * Pobiera zdjęcia WSZYSTKICH zeskanowanych produktów, równolegle, z limitem bezpieczeństwa
+ * (IMAGE_EXPORT_CAP). Gdy File System Access jest dostępny, zapisuje każde zdjęcie od razu jako
+ * plik w <domainDir>/images/<marka>/ i zwraca `zipEntries: []` (nic do spakowania — user ma już
+ * gotowy folder). Gdy niedostępny, zwraca zebrane bajty jako `zipEntries` do spakowania przez
+ * wywołującego — używane zarówno przez samo "Download Images", jak i przez "Download Full"
+ * (gdzie trafiają razem z CSV/XLSX/JSON do jednego wspólnego ZIP-a, patrz onDownloadFull).
+ * @param {(text: string) => void} [onProgress]
  */
+async function fetchProductImages(onProgress) {
+  const domainSlug = slugifyDomain(state.config.domain);
+  const useFsDir = fsdir.isSupported();
+  let imagesDirHandle = null;
+  if (useFsDir) {
+    const dir = await ensureOutputDir();
+    const domainDir = await fsdir.subdir(dir, domainSlug);
+    imagesDirHandle = await fsdir.subdir(domainDir, "images");
+  }
+
+  // Zbieramy zadania pobrania z limitem bezpieczeństwa (IMAGE_EXPORT_CAP) — katalog może mieć
+  // setki produktów × kilka zdjęć każdy, nie chcemy tego zrobić bez żadnego limitu. Marka —
+  // ten sam slug co [marka] w linkach eksportu (patrz lib/export.js, slugifyBrand) — musi się
+  // zgadzać, żeby link w CSV/XLSX wskazywał na realną strukturę folderów po wgraniu na domenę.
+  const tasks = [];
+  state.scanProducts.forEach((product, idx) => {
+    if (tasks.length >= IMAGE_EXPORT_CAP) return;
+    const urls = product.fields?.images?.values || (product.fields?.images?.value ? [product.fields.images.value] : []);
+    const baseName = slugifyDomain(fieldText(product.fields, "sku") || `produkt-${idx + 1}`);
+    const brandSlug = slugifyBrand(fieldText(product.fields, "brand"));
+    urls.forEach((url, i) => {
+      if (tasks.length >= IMAGE_EXPORT_CAP) return;
+      tasks.push({ url, name: i > 0 ? `${baseName}-${i + 1}` : baseName, brandSlug });
+    });
+  });
+
+  let done = 0;
+  let failed = 0;
+  const zipEntries = []; // wypełniane tylko gdy !useFsDir — trzymamy bajty w pamięci do jednego ZIP-a na końcu
+  const brandDirHandles = new Map(); // cache uchwytów podfolderów marek (useFsDir), żeby nie odpytywać FS przy każdym zdjęciu
+
+  async function brandDirHandleFor(brandSlug) {
+    if (brandDirHandles.has(brandSlug)) return brandDirHandles.get(brandSlug);
+    const handle = await fsdir.subdir(imagesDirHandle, brandSlug);
+    brandDirHandles.set(brandSlug, handle);
+    return handle;
+  }
+
+  await runWithConcurrency(tasks, IMAGE_FETCH_CONCURRENCY, async (task) => {
+    try {
+      const res = await fetch(task.url);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const filename = `${task.name}.${extensionFromUrl(task.url, res.headers.get("content-type"))}`;
+      if (useFsDir) {
+        const brandDir = await brandDirHandleFor(task.brandSlug);
+        await fsdir.writeFile(brandDir, filename, await res.blob());
+      } else {
+        zipEntries.push({ name: `${task.brandSlug}/${filename}`, bytes: new Uint8Array(await res.arrayBuffer()) });
+      }
+      done += 1;
+    } catch (err) {
+      failed += 1;
+      log(`Błąd pobierania zdjęcia ${task.url}: ${err.message || err}`);
+    }
+    if (onProgress) onProgress(`Pobieranie zdjęć: ${done + failed}/${tasks.length}…`);
+  });
+
+  return { useFsDir, done, failed, total: tasks.length, zipEntries };
+}
+
 async function onExportImages() {
   if (!(await ensureScanResults())) return;
   readFormIntoConfig();
@@ -793,70 +857,19 @@ async function onExportImages() {
   btn.disabled = true;
   try {
     const domainSlug = slugifyDomain(state.config.domain);
-    const useFsDir = fsdir.isSupported();
-    let imagesDirHandle = null;
-    if (useFsDir) {
-      const dir = await ensureOutputDir();
-      const domainDir = await fsdir.subdir(dir, domainSlug);
-      imagesDirHandle = await fsdir.subdir(domainDir, "images");
-    }
-
-    // Zbieramy zadania pobrania z limitem bezpieczeństwa (IMAGE_EXPORT_CAP) — katalog może mieć
-    // setki produktów × kilka zdjęć każdy, nie chcemy tego zrobić bez żadnego limitu. Marka —
-    // ten sam slug co [marka] w linkach eksportu (patrz lib/export.js, slugifyBrand) — musi się
-    // zgadzać, żeby link w CSV/XLSX wskazywał na realną strukturę folderów po wgraniu na domenę.
-    const tasks = [];
-    state.scanProducts.forEach((product, idx) => {
-      if (tasks.length >= IMAGE_EXPORT_CAP) return;
-      const urls = product.fields?.images?.values || (product.fields?.images?.value ? [product.fields.images.value] : []);
-      const baseName = slugifyDomain(fieldText(product.fields, "sku") || `produkt-${idx + 1}`);
-      const brandSlug = slugifyBrand(fieldText(product.fields, "brand"));
-      urls.forEach((url, i) => {
-        if (tasks.length >= IMAGE_EXPORT_CAP) return;
-        tasks.push({ url, name: i > 0 ? `${baseName}-${i + 1}` : baseName, brandSlug });
-      });
-    });
-
-    let done = 0;
-    let failed = 0;
-    const zipEntries = []; // wypełniane tylko gdy !useFsDir — trzymamy bajty w pamięci do jednego ZIP-a na końcu
-    const brandDirHandles = new Map(); // cache uchwytów podfolderów marek (useFsDir), żeby nie odpytywać FS przy każdym zdjęciu
-
-    async function brandDirHandleFor(brandSlug) {
-      if (brandDirHandles.has(brandSlug)) return brandDirHandles.get(brandSlug);
-      const handle = await fsdir.subdir(imagesDirHandle, brandSlug);
-      brandDirHandles.set(brandSlug, handle);
-      return handle;
-    }
-
-    await runWithConcurrency(tasks, IMAGE_FETCH_CONCURRENCY, async (task) => {
-      try {
-        const res = await fetch(task.url);
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const filename = `${task.name}.${extensionFromUrl(task.url, res.headers.get("content-type"))}`;
-        if (useFsDir) {
-          const brandDir = await brandDirHandleFor(task.brandSlug);
-          await fsdir.writeFile(brandDir, filename, await res.blob());
-        } else {
-          zipEntries.push({ name: `${task.brandSlug}/${filename}`, bytes: new Uint8Array(await res.arrayBuffer()) });
-        }
-        done += 1;
-      } catch (err) {
-        failed += 1;
-        log(`Błąd pobierania zdjęcia ${task.url}: ${err.message || err}`);
-      }
-      progressEl.textContent = `Pobieranie zdjęć: ${done + failed}/${tasks.length}…`;
+    const { useFsDir, done, failed, zipEntries } = await fetchProductImages((text) => {
+      progressEl.textContent = text;
     });
 
     let zipFilename = "";
     if (!useFsDir && zipEntries.length > 0) {
       progressEl.textContent = `Pakowanie ${zipEntries.length} zdjęć do jednego pliku ZIP…`;
-      const zipBlob = imagesToZipBlob(zipEntries);
       zipFilename = `${domainSlug}-zdjecia.zip`;
-      // Ten sam `${domainSlug}/` co CSV/XLSX/JSON w writeOutput() — wszystko z jednego skanu
-      // ląduje w jednym folderze bez względu na to, którego przycisku (CSV/XLSX/JSON/Full)
-      // user użył.
-      await downloadBlobViaChrome(zipBlob, `${domainSlug}/${zipFilename}`);
+      // Nazwa płaska, bez podfolderu w `filename` przekazywanym do chrome.downloads — to właśnie
+      // ta ścieżka (podfolder zakodowany w nazwie pobrania) okazała się niewiarygodna na
+      // niektórych systemach (plik lądował pod losową nazwą blob-a, patrz downloadBlobViaChrome
+      // i writeOutput). Nazwa pliku już ma domenę w sobie, więc user i tak łatwo go rozpozna.
+      await downloadBlobViaChrome(imagesToZipBlob(zipEntries), zipFilename);
     }
 
     const doneNote = useFsDir ? `${done} zdjęć zapisanych` : zipFilename ? `${done} zdjęć spakowanych do ${zipFilename}` : "0 zdjęć";
@@ -873,6 +886,22 @@ async function onExportImages() {
  * foldery wg marki). Woła wprost te same funkcje co osobne przyciski, więc nic nie duplikuje —
  * jeśli skan jeszcze nie był zrobiony, każda z nich i tak sama go uruchomi przy pierwszym wywołaniu
  * (ensureScanResults/ensureAdapterRows), ale robimy to tu raz z góry, żeby nie robić tego 4×. */
+/**
+ * "Download Full" — CSV + XLSX + JSON + zdjęcia, jednym kliknięciem.
+ *
+ * Gdy File System Access jest dostępny: po prostu woła 4 osobne eksporty — każdy z nich i tak
+ * zapisuje bezpośrednio do prawdziwego folderu na dysku (writeOutput/fetchProductImages), więc
+ * nie ma czego pakować.
+ *
+ * Gdy niedostępny (typowe dla side panelu — to jest tryb, w którym user zgłaszał, że pliki
+ * zamiast do folderu <nazwa-strony> lądowały pojedynczo, pod dziwnymi nazwami): zamiast 4
+ * osobnych chrome.downloads.download(), pakujemy WSZYSTKO — CSV, XLSX, JSON i zdjęcia — do
+ * JEDNEGO pliku ZIP z folderem <nazwa-strony> W ŚRODKU i pobieramy go JEDNĄ operacją. Struktura
+ * folderów wtedy żyje wewnątrz samego ZIP-a (gwarantowana przez format pliku), a nie w
+ * argumencie `filename` przekazanym do chrome.downloads — ten drugi mechanizm okazał się
+ * niewiarygodny na części systemów (plik lądował pod losową, wygenerowaną nazwą zamiast we
+ * wskazanym podfolderze). User rozpakowuje jeden plik i ma gotowy, kompletny folder.
+ */
 async function onDownloadFull() {
   const btn = el("export-full-btn");
   btn.disabled = true;
@@ -882,17 +911,52 @@ async function onDownloadFull() {
   // przez CAŁY ciąg CSV+XLSX+JSON+zdjęcia. Bez niej zdarzenie chrome.tabs.onUpdated spóźnione o
   // ułamek sekundy (np. pushState wywołany klikaniem "następna strona" pod koniec skanu — patrz
   // applyActiveTab) mogłoby dolecieć akurat w trakcie zapisywania plików i zresetować
-  // state.config w połowie eksportu — dokładnie tak różne pliki z jednego "Download Full"
-  // trafiały do różnych/złych folderów.
+  // state.config w połowie eksportu.
   state.downloadingFull = true;
   try {
     if (!(await ensureScanResults())) return;
-    await onExportCsv();
-    await onExportExcel();
-    await onExportJsonPreview();
-    await onExportImages();
-    toast("Pełne pobranie zakończone: CSV + XLSX + JSON + zdjęcia");
-    log("Download Full: zakończono CSV, XLSX, JSON i zdjęcia.");
+    readFormIntoConfig();
+
+    if (fsdir.isSupported()) {
+      await onExportCsv();
+      await onExportExcel();
+      await onExportJsonPreview();
+      await onExportImages();
+      toast("Pełne pobranie zakończone: CSV + XLSX + JSON + zdjęcia");
+      log("Download Full: zakończono CSV, XLSX, JSON i zdjęcia.");
+      return;
+    }
+
+    const progressEl = el("scan-progress-text");
+    el("scan-progress-wrap").hidden = false;
+    progressEl.textContent = "Download Full: przygotowywanie CSV/XLSX/JSON…";
+
+    const rows = await ensureAdapterRows();
+    if (!rows) return;
+
+    const domainSlug = slugifyDomain(state.config.domain);
+    const entries = [
+      { name: `${domainSlug}/${domainSlug}.csv`, bytes: new TextEncoder().encode("﻿" + rowsToCsv(rows)) },
+      { name: `${domainSlug}/${domainSlug}.xlsx`, bytes: new Uint8Array(await rowsToXlsxBlob(rows).arrayBuffer()) },
+    ];
+    const metadata = { domain: state.config.domain, generated_at: new Date().toISOString(), count: rows.length, image_links: state.config.image_links };
+    entries.push({ name: `${domainSlug}/${domainSlug}.json`, bytes: new TextEncoder().encode(JSON.stringify({ ...metadata, rows }, null, 2)) });
+
+    const images = await fetchProductImages((text) => {
+      progressEl.textContent = `Download Full: ${text}`;
+    });
+    for (const entry of images.zipEntries) {
+      entries.push({ name: `${domainSlug}/zdjecia/${entry.name}`, bytes: entry.bytes });
+    }
+
+    progressEl.textContent = `Download Full: pakowanie ${entries.length} plików do jednego ZIP-a…`;
+    const zipBlob = filesToZipBlob(entries);
+    const zipFilename = `${domainSlug}-pelny-eksport.zip`;
+    await downloadBlobViaChrome(zipBlob, zipFilename);
+
+    progressEl.textContent = `Download Full: gotowe — ${zipFilename} (folder ${domainSlug}/ w środku, ${images.done} zdjęć${images.failed ? `, ${images.failed} błędów zdjęć` : ""}).`;
+    toast(`Pełne pobranie gotowe: ${zipFilename}`);
+    log(`Download Full: spakowano CSV+XLSX+JSON+${images.done} zdjęć do ${zipFilename} (folder ${domainSlug}/ w środku).`);
   } catch (err) {
     toastError(err);
   } finally {

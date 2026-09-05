@@ -11,6 +11,7 @@ import {
   rowsToCsv,
   rowsToXlsxBlob,
   imagesToZipBlob,
+  filesToZipBlob,
   slugifyBrand,
 } from "../lib/export.js";
 
@@ -154,6 +155,24 @@ test("imagesToZipBlob na pustej liście nadal zwraca poprawny (pusty) plik ZIP",
   assert.equal(bytes[1], 0x4b);
   assert.equal(bytes[2], 0x05);
   assert.equal(bytes[3], 0x06);
+});
+
+test("filesToZipBlob buduje jeden ZIP z folderem <nazwa-strony> w środku (Download Full)", async () => {
+  // To jest fundament "wszystko w jednym folderze po rozpakowaniu" dla trybu chrome.downloads —
+  // struktura folderów żyje WEWNĄTRZ zipa (nazwy wpisów), nie w argumencie `filename` przekazanym
+  // do chrome.downloads.download (ten mechanizm okazał się niewiarygodny na części systemów).
+  const csvBytes = new TextEncoder().encode("a,b\n1,2");
+  const blob = filesToZipBlob([
+    { name: "sklep_pl/sklep_pl.csv", bytes: csvBytes },
+    { name: "sklep_pl/zdjecia/acme/produkt-1.jpg", bytes: new Uint8Array([1, 2, 3]) },
+  ]);
+  assert.equal(blob.type, "application/zip");
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  assert.equal(bytes[0], 0x50);
+  assert.equal(bytes[1], 0x4b);
+  const text = new TextDecoder().decode(bytes);
+  assert.match(text, /sklep_pl\/sklep_pl\.csv/);
+  assert.match(text, /sklep_pl\/zdjecia\/acme\/produkt-1\.jpg/);
 });
 
 test("normalizeImageTemplate buduje wzór z domeny z segmentem [marka] zgodny z adapter request", () => {

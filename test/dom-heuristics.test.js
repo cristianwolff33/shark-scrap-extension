@@ -1,6 +1,17 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { looksLikeGpsrHeading, detectCurrencyFromText, firstUrlFromSrcset, largestUrlFromSrcset, pickImageUrl } from "../lib/dom-heuristics.js";
+import {
+  looksLikeGpsrHeading,
+  detectCurrencyFromText,
+  firstUrlFromSrcset,
+  largestUrlFromSrcset,
+  pickImageUrl,
+  IMAGE_GALLERY_SELECTORS,
+} from "../lib/dom-heuristics.js";
+
+test("IMAGE_GALLERY_SELECTORS obejmuje WooCommerce (.woocommerce-product-gallery) — realna regresja z motos.pl: bez tego cała galeria była niewidoczna", () => {
+  assert.ok(IMAGE_GALLERY_SELECTORS.some((sel) => sel.includes("woocommerce-product-gallery")));
+});
 
 test("looksLikeGpsrHeading rozpoznaje literalny skrót GPSR (dowolna wielkość liter)", () => {
   assert.ok(looksLikeGpsrHeading("GPSR"));
@@ -96,6 +107,16 @@ test("pickImageUrl: miniaturka opakowana w link lightboxa do pełnego zdjęcia w
 test("pickImageUrl ignoruje link opakowujący, gdy href NIE wygląda na obraz (np. link do strony produktu)", () => {
   const el = fakeImgEl({ src: "/miniaturka.jpg" }, { closestLink: { href: "/produkt/12345" } });
   assert.equal(pickImageUrl(el), "/miniaturka.jpg");
+});
+
+test("pickImageUrl rozpoznaje data-large_image (PODKREŚLNIK) — standard WooCommerce", () => {
+  // Realny przypadek znaleziony na motos.pl: WooCommerce ustawia data-large_image (nie
+  // data-large-image z myślnikiem) obok miniaturki w src.
+  const el = fakeImgEl({
+    src: "https://sklep.pl/wp-content/uploads/produkt-600x600.webp",
+    "data-large_image": "https://sklep.pl/wp-content/uploads/produkt.webp",
+  });
+  assert.equal(pickImageUrl(el), "https://sklep.pl/wp-content/uploads/produkt.webp");
 });
 
 test("pickImageUrl preferuje dedykowany atrybut zoom/full nad lazy-load i srcset", () => {

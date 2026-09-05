@@ -1246,6 +1246,47 @@ async function onClearAiSettings() {
   toast(`${aiProviderLabel()} connector rozłączony`);
 }
 
+/**
+ * Side panel Chrome jest JEDEN na całe okno, nie przypięty do konkretnej karty — w
+ * przeciwieństwie do popupu NIE zamyka się i nie reinicjalizuje przy przełączeniu karty ani
+ * nawigacji na niej, więc bez tej funkcji panel na zawsze zostawał przy stronie, na której był
+ * otwarty pierwszy raz (stąd trzeba było zamykać/otwierać wtyczkę, żeby zobaczyć nowy adres).
+ * Wołana raz w init() i potem za każdym razem, gdy user przełączy kartę albo nawiguje na
+ * śledzonej karcie (patrz nasłuchy chrome.tabs.onActivated/onUpdated w init()).
+ */
+async function applyActiveTab(tab, { silent = false } = {}) {
+  if (!tab || !tab.url || !/^https?:/i.test(tab.url)) return; // pomijamy chrome://, about:blank itp. — nie ma tam czego skanować
+
+  const isSameTabAndUrl = tab.id === state.tabId && tab.url === state.url;
+  if (isSameTabAndUrl) return;
+
+  const isNewTab = tab.id !== state.tabId;
+  state.tabId = tab.id;
+  state.url = tab.url;
+  state.domain = new URL(tab.url).hostname;
+
+  // Nowa karta/nawigacja = poprzedni wynik skanu dotyczy INNEJ strony, nie ma sensu go trzymać.
+  state.scanning = false;
+  state.scanProducts = [];
+  state.adapterRows = null;
+
+  const existing = await loadConfig(state.domain);
+  state.config = existing || createDefaultConfig(state.domain, tab.url);
+  if (!existing) state.config.start_url = tab.url;
+
+  renderForm();
+  el("results-tbody").innerHTML = "";
+  el("results-count").textContent = "0";
+  el("results-card").hidden = true;
+  renderWarnings([]);
+  el("scan-progress-wrap").hidden = true;
+  el("scan-btn").disabled = false;
+  el("refresh-tab-btn").disabled = false;
+  setExportButtonsDisabled(false);
+
+  if (!silent && isNewTab) toast(`Przełączono na: ${state.domain}`);
+}
+
 // --- init ---------------------------------------------------------------------------
 
 async function init() {
@@ -1260,6 +1301,23 @@ async function init() {
   if (!existing) state.config.start_url = tab.url;
 
   renderForm();
+
+  // Panel jest globalny dla okna (patrz applyActiveTab) — dogrywamy się do zmian karty na
+  // żywo, żeby user nie musiał zamykać/otwierać wtyczki po każdej nawigacji/przełączeniu karty.
+  chrome.tabs.onActivated.addListener(async ({ tabId, windowId }) => {
+    try {
+      const currentWindow = await chrome.windows.getCurrent();
+      if (currentWindow && currentWindow.id !== windowId) return; // inne okno — nie nasz panel
+      const activatedTab = await chrome.tabs.get(tabId);
+      await applyActiveTab(activatedTab);
+    } catch {
+      // karta mogła zniknąć między eventem a odczytem (zamknięta w międzyczasie) — ignorujemy
+    }
+  });
+  chrome.tabs.onUpdated.addListener((tabId, changeInfo, updatedTab) => {
+    if (tabId !== state.tabId || !changeInfo.url) return; // changeInfo.url przychodzi TYLKO gdy URL faktycznie się zmienił
+    applyActiveTab(updatedTab).catch(() => {});
+  });
 
   state.outputDirHandle = await fsdir.restoreOutputDir();
   updateFolderLabel();

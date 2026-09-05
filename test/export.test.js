@@ -13,6 +13,7 @@ import {
   imagesToZipBlob,
   filesToZipBlob,
   slugifyBrand,
+  guessFullSizeImageUrl,
 } from "../lib/export.js";
 
 /** Szuka ciągu bajtów `needle` gdziekolwiek w `haystack` — wystarczy do sprawdzenia, że metoda
@@ -185,6 +186,22 @@ test("slugifyBrand normalizuje nazwę marki do bezpiecznego segmentu ścieżki/U
   assert.equal(slugifyBrand("Łoś & Syn Sp. z o.o."), "los-syn-sp-z-o-o");
   assert.equal(slugifyBrand(""), "bez-marki");
   assert.equal(slugifyBrand(undefined), "bez-marki");
+});
+
+test("guessFullSizeImageUrl zdejmuje sufiks miniaturki WordPress/WooCommerce (-SZERxWYS)", () => {
+  assert.equal(
+    guessFullSizeImageUrl("https://sklep.pl/wp-content/uploads/2024/01/produkt-300x300.jpg"),
+    "https://sklep.pl/wp-content/uploads/2024/01/produkt.jpg"
+  );
+  assert.equal(guessFullSizeImageUrl("https://sklep.pl/img/produkt-1024x768.png?v=2"), "https://sklep.pl/img/produkt.png?v=2");
+});
+
+test("guessFullSizeImageUrl zwraca pusty string, gdy URL nie pasuje do wzorca miniaturki (nic do zgadywania)", () => {
+  assert.equal(guessFullSizeImageUrl("https://sklep.pl/img/produkt.jpg"), "");
+  assert.equal(guessFullSizeImageUrl(""), "");
+  assert.equal(guessFullSizeImageUrl(undefined), "");
+  // Rok w URL-u (2024) nie powinien być mylnie wzięty za wymiary miniaturki.
+  assert.equal(guessFullSizeImageUrl("https://sklep.pl/wp-content/uploads/2024/01/produkt.jpg"), "");
 });
 
 test("productsToAdapterRows tworzy finalną strukturę kolumn (w tym GPSR) i linki zdjN z segmentem marki", () => {

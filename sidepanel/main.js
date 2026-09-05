@@ -1,7 +1,7 @@
 import { PRODUCT_FIELDS, createDefaultConfig, slugifyDomain } from "../lib/schema.js";
 import { createBridgeClient } from "../lib/bridge-client.js";
 import { loadBridgeSettings, loadConfig, saveBridgeSettings, saveConfig, loadAiSettings, saveAiSettings } from "../lib/storage.js";
-import { productsToAdapterRows, rowsToCsv, rowsToJsonBlob, rowsToXlsxBlob, imagesToZipBlob, filesToZipBlob, slugifyBrand, normalizeImageTemplate } from "../lib/export.js";
+import { productsToAdapterRows, rowsToCsv, rowsToJsonBlob, rowsToXlsxBlob, imagesToZipBlob, filesToZipBlob, slugifyBrand, normalizeImageTemplate, guessFullSizeImageUrl } from "../lib/export.js";
 import { generateAdapterRows as generateAdapterRowsCodex, DEFAULT_MODEL as CODEX_DEFAULT_MODEL } from "../lib/openai-client.js";
 import { generateAdapterRows as generateAdapterRowsClaude, DEFAULT_MODEL as CLAUDE_DEFAULT_MODEL } from "../lib/anthropic-client.js";
 import { formatScanProgress } from "../lib/crawler.js";
@@ -780,6 +780,25 @@ async function runWithConcurrency(items, limit, worker) {
 }
 
 /**
+ * Próbuje pobrać PEŁNOWYMIAROWĄ wersję zdjęcia (zgadywaną z typowego wzorca nazewnictwa
+ * miniaturki WordPress/WooCommerce — patrz guessFullSizeImageUrl), a dopiero gdy się nie uda
+ * (zgadywany URL nie istnieje / błąd sieci), spada na oryginalny URL wykryty na stronie. NIGDY
+ * nie ufamy zgadniętemu URL-owi w ciemno — weryfikacja to sam fakt udanego pobrania.
+ */
+async function fetchImageWithFullSizeUpgrade(url) {
+  const upgraded = guessFullSizeImageUrl(url);
+  if (upgraded) {
+    try {
+      const res = await fetch(upgraded);
+      if (res.ok) return res;
+    } catch {
+      // zgadywany pełny rozmiar nie istnieje/błąd sieci — spadamy na oryginalny URL niżej
+    }
+  }
+  return fetch(url);
+}
+
+/**
  * Pobiera zdjęcia WSZYSTKICH zeskanowanych produktów, równolegle, z limitem bezpieczeństwa
  * (IMAGE_EXPORT_CAP). Gdy File System Access jest dostępny, zapisuje każde zdjęcie od razu jako
  * plik w <domainDir>/images/<marka>/ i zwraca `zipEntries: []` (nic do spakowania — user ma już
@@ -828,7 +847,7 @@ async function fetchProductImages(onProgress) {
 
   await runWithConcurrency(tasks, IMAGE_FETCH_CONCURRENCY, async (task) => {
     try {
-      const res = await fetch(task.url);
+      const res = await fetchImageWithFullSizeUpgrade(task.url);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const filename = `${task.name}.${extensionFromUrl(task.url, res.headers.get("content-type"))}`;
       if (useFsDir) {

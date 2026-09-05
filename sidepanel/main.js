@@ -797,7 +797,10 @@ function fetchImage(url) {
  * Próbuje pobrać PEŁNOWYMIAROWĄ wersję zdjęcia, zgadywaną z typowych wzorców nazewnictwa/query
  * stringa miniaturek (WordPress/WooCommerce, Shopify, CDN-y resize-as-a-service — patrz
  * guessFullSizeImageUrls), próbując KOLEJNO wszystkich kandydatów, a dopiero gdy ŻADEN nie
- * zadziała, spada na oryginalny URL wykryty na stronie. NIGDY nie ufamy zgadniętemu URL-owi w
+ * zadziała, spada na oryginalny URL wykryty na stronie z referrerPolicy "no-referrer" (omija
+ * typową ochronę hotlinkingu opartą o niepasujący Referer). Gdy i to zawiedzie, ostatnia próba
+ * używa DOMYŚLNEJ polityki referrera przeglądarki — część serwerów działa odwrotnie i wymaga
+ * JAKIEGOŚ Refererera, blokując jego całkowity brak. NIGDY nie ufamy zgadniętemu URL-owi w
  * ciemno — weryfikacja to sam fakt udanego pobrania (status ok).
  */
 async function fetchImageWithFullSizeUpgrade(url) {
@@ -809,7 +812,16 @@ async function fetchImageWithFullSizeUpgrade(url) {
       // ten konkretny kandydat nie istnieje/błąd sieci — próbujemy kolejnego, potem oryginału
     }
   }
-  return fetchImage(url);
+  try {
+    const res = await fetchImage(url);
+    if (res.ok) return res;
+  } catch {
+    // brak Refererera (no-referrer) też może zostać odrzucony — część serwerów wymaga JAKIEGOŚ
+    // Refererera i blokuje jego całkowity brak (odwrotnie niż typowa ochrona hotlinkingu, która
+    // blokuje NIEPASUJĄCY Referer, ale przepuszcza brak). Ostatnia próba niżej z domyślną
+    // polityką przeglądarki — inny kompromis niż no-referrer, może przejść tam, gdzie tamten nie.
+  }
+  return fetch(url);
 }
 
 /**

@@ -74,7 +74,7 @@ async function detectShopifyFields(doc, pageUrl) {
 
 /** @param {Document} doc @param {string} pageUrl */
 async function detectProductFromDoc(doc, pageUrl) {
-  const [{ detectFromJsonLd }, { detectFromMicrodata }, { mapOgTags }, { detectFromDom }, { mergeFieldSources }] = await Promise.all([
+  const [{ detectFromJsonLd }, { detectFromMicrodata }, { mapOgTags }, { detectFromDom }, { mergeFieldSources, pickRichestImagesField }] = await Promise.all([
     loadLib("jsonld.js"),
     loadLib("microdata.js"),
     loadLib("meta.js"),
@@ -96,6 +96,11 @@ async function detectProductFromDoc(doc, pageUrl) {
       if (field === "variants" || !merged[field]) merged[field] = spec;
     }
   }
+
+  // Patrz lib/fields.js:pickRichestImagesField — dla "images" ogólny priorytet źródeł bywa złym
+  // wyborem (jedno małe og:image z meta ZAWSZE wygrywało z całą galerią wykrytą w DOM).
+  const richestImages = pickRichestImagesField([jsonld.fields.images, microdata.fields.images, meta.images, dom.fields.images, shopify?.images]);
+  if (richestImages) merged.images = richestImages;
 
   const canonical = doc.querySelector('link[rel="canonical"]')?.getAttribute("href") || "";
   if (!merged.product_url && canonical) {

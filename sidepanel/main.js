@@ -820,10 +820,14 @@ async function fetchImageWithFullSizeUpgrade(url) {
  * wywołującego — używane zarówno przez samo "Download Images", jak i przez "Download Full"
  * (gdzie trafiają razem z CSV/XLSX/JSON do jednego wspólnego ZIP-a, patrz onDownloadFull).
  * @param {(text: string) => void} [onProgress]
+ * @param {{forceZipEntries?: boolean}} [opts] - forceZipEntries=true ignoruje File System Access
+ * nawet gdy dostępny i zawsze zwraca bajty jako zipEntries — używane przez "Download Full",
+ * które ma zawsze pakować obrazki razem z CSV/XLSX/JSON do jednego ZIP-a, niezależnie od
+ * środowiska (patrz onDownloadFull).
  */
-async function fetchProductImages(onProgress) {
+async function fetchProductImages(onProgress, { forceZipEntries = false } = {}) {
   const domainSlug = slugifyDomain(state.config.domain);
-  const useFsDir = fsdir.isSupported();
+  const useFsDir = fsdir.isSupported() && !forceZipEntries;
   let imagesDirHandle = null;
   if (useFsDir) {
     const dir = await ensureOutputDir();
@@ -920,25 +924,22 @@ async function onExportImages() {
   }
 }
 
-/** "Download Full" — jeden klik zamiast czterech: CSV + XLSX + JSON + zdjęcia (podzielone na
- * foldery wg marki). Woła wprost te same funkcje co osobne przyciski, więc nic nie duplikuje —
- * jeśli skan jeszcze nie był zrobiony, każda z nich i tak sama go uruchomi przy pierwszym wywołaniu
- * (ensureScanResults/ensureAdapterRows), ale robimy to tu raz z góry, żeby nie robić tego 4×. */
 /**
- * "Download Full" — CSV + XLSX + JSON + zdjęcia, jednym kliknięciem.
+ * "Download Full" — CSV + XLSX + JSON + folder ze zdjęciami, ZAWSZE spakowane razem w JEDEN
+ * plik ZIP nazwany od strony (`<nazwa-strony>-pelny-eksport.zip`, z folderem `<nazwa-strony>/`
+ * w środku), bez wyjątków zależnych od środowiska/przeglądarki — to jest cały kontrakt tego
+ * przycisku, nic więcej, nic mniej.
  *
- * Gdy File System Access jest dostępny: po prostu woła 4 osobne eksporty — każdy z nich i tak
- * zapisuje bezpośrednio do prawdziwego folderu na dysku (writeOutput/fetchProductImages), więc
- * nie ma czego pakować.
- *
- * Gdy niedostępny (typowe dla side panelu — to jest tryb, w którym user zgłaszał, że pliki
- * zamiast do folderu <nazwa-strony> lądowały pojedynczo, pod dziwnymi nazwami): zamiast 4
- * osobnych chrome.downloads.download(), pakujemy WSZYSTKO — CSV, XLSX, JSON i zdjęcia — do
- * JEDNEGO pliku ZIP z folderem <nazwa-strony> W ŚRODKU i pobieramy go JEDNĄ operacją. Struktura
- * folderów wtedy żyje wewnątrz samego ZIP-a (gwarantowana przez format pliku), a nie w
- * argumencie `filename` przekazanym do chrome.downloads — ten drugi mechanizm okazał się
- * niewiarygodny na części systemów (plik lądował pod losową, wygenerowaną nazwą zamiast we
- * wskazanym podfolderze). User rozpakowuje jeden plik i ma gotowy, kompletny folder.
+ * Wcześniej zachowanie różniło się w zależności od tego, czy File System Access było dostępne
+ * (osobne pliki w realnym folderze) czy nie (jeden ZIP) — user chciał JEDNEGO, przewidywalnego
+ * zachowania zawsze, więc `fetchProductImages` jest tu wołane z `forceZipEntries: true`, żeby
+ * zawsze zwróciło bajty do spakowania, niezależnie od dostępności File System Access. Struktura
+ * folderów żyje WEWNĄTRZ samego ZIP-a (gwarantowana przez format pliku), a nie w argumencie
+ * `filename` przekazywanym do chrome.downloads — ten mechanizm okazał się niewiarygodny na
+ * części systemów (plik lądował pod losową, wygenerowaną nazwą zamiast we wskazanym
+ * podfolderze). Jedyna różnica zależna od środowiska to gdzie ten JEDEN plik ZIP ląduje: gdy
+ * File System Access jest dostępne — bezpośrednio w wybranym folderze wyjściowym; w przeciwnym
+ * razie — przez chrome.downloads do Pobrane.
  */
 async function onDownloadFull() {
   const btn = el("export-full-btn");
@@ -955,16 +956,6 @@ async function onDownloadFull() {
     if (!(await ensureScanResults())) return;
     readFormIntoConfig();
 
-    if (fsdir.isSupported()) {
-      await onExportCsv();
-      await onExportExcel();
-      await onExportJsonPreview();
-      await onExportImages();
-      toast("Pełne pobranie zakończone: CSV + XLSX + JSON + zdjęcia");
-      log("Download Full: zakończono CSV, XLSX, JSON i zdjęcia.");
-      return;
-    }
-
     const progressEl = el("scan-progress-text");
     el("scan-progress-wrap").hidden = false;
     progressEl.textContent = "Download Full: przygotowywanie CSV/XLSX/JSON…";
@@ -980,21 +971,31 @@ async function onDownloadFull() {
     const metadata = { domain: state.config.domain, generated_at: new Date().toISOString(), count: rows.length, image_links: state.config.image_links };
     entries.push({ name: `${domainSlug}/${domainSlug}.json`, bytes: new TextEncoder().encode(JSON.stringify({ ...metadata, rows }, null, 2)) });
 
-    const images = await fetchProductImages((text) => {
-      progressEl.textContent = `Download Full: ${text}`;
-    });
+    const images = await fetchProductImages(
+      (text) => {
+        progressEl.textContent = `Download Full: ${text}`;
+      },
+      { forceZipEntries: true }
+    );
     for (const entry of images.zipEntries) {
       entries.push({ name: `${domainSlug}/zdjecia/${entry.name}`, bytes: entry.bytes });
+    }
+    if (images.truncated) {
+      log(`Download Full: znaleziono ${images.totalAvailable} zdjęć, ale limit bezpieczeństwa (${IMAGE_EXPORT_CAP}) obciął listę — część zdjęć NIE trafiła do ZIP-a.`);
     }
 
     progressEl.textContent = `Download Full: pakowanie ${entries.length} plików do jednego ZIP-a…`;
     const zipBlob = filesToZipBlob(entries);
     const zipFilename = `${domainSlug}-pelny-eksport.zip`;
-    await downloadBlobViaChrome(zipBlob, zipFilename);
 
-    if (images.truncated) {
-      log(`Download Full: znaleziono ${images.totalAvailable} zdjęć, ale limit bezpieczeństwa (${IMAGE_EXPORT_CAP}) obciął listę — część zdjęć NIE trafiła do ZIP-a.`);
+    if (fsdir.isSupported()) {
+      const dir = await ensureOutputDir();
+      const domainDir = await fsdir.subdir(dir, domainSlug);
+      await fsdir.writeFile(domainDir, zipFilename, zipBlob);
+    } else {
+      await downloadBlobViaChrome(zipBlob, zipFilename);
     }
+
     const truncNote = images.truncated ? ` — UWAGA: zdjęcia obcięte do limitu ${IMAGE_EXPORT_CAP}/${images.totalAvailable}` : "";
     progressEl.textContent = `Download Full: gotowe — ${zipFilename} (folder ${domainSlug}/ w środku, ${images.done} zdjęć${images.failed ? `, ${images.failed} błędów zdjęć` : ""}${truncNote}).`;
     toast(`Pełne pobranie gotowe: ${zipFilename}${truncNote}`);

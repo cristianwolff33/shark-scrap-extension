@@ -51,6 +51,27 @@ function normalizeUrlFields(fields, pageUrl) {
   return fields;
 }
 
+/**
+ * Shopify ma publiczne Storefront JSON API dla każdego produktu (<url>.json) z PEŁNYMI danymi
+ * wariantów (sku/cena/dostępność każdego), czego nawet JSON-LD większości Shopify-owych themów
+ * nie eksponuje (patrz lib/shopify.js). Próbujemy TYLKO gdy strona faktycznie wygląda na
+ * Shopify (kilka niezależnych sygnałów w HTML-u) — żeby nie robić zbędnego requestu na
+ * pozostałych ~90% sklepów.
+ */
+async function detectShopifyFields(doc, pageUrl) {
+  const { looksLikeShopify, shopifyProductJsonUrl, mapShopifyProduct } = await loadLib("shopify.js");
+  if (!looksLikeShopify(doc.documentElement?.outerHTML || "")) return null;
+  const jsonUrl = shopifyProductJsonUrl(pageUrl);
+  if (!jsonUrl) return null;
+  try {
+    const res = await fetch(jsonUrl, { credentials: "include", cache: "no-store" });
+    if (!res.ok) return null;
+    return mapShopifyProduct(await res.json());
+  } catch {
+    return null; // Storefront JSON niedostępne/nieoczekiwany kształt — zostajemy przy jsonld/microdata/meta/dom
+  }
+}
+
 /** @param {Document} doc @param {string} pageUrl */
 async function detectProductFromDoc(doc, pageUrl) {
   const [{ detectFromJsonLd }, { detectFromMicrodata }, { mapOgTags }, { detectFromDom }, { mergeFieldSources }] = await Promise.all([
@@ -65,8 +86,16 @@ async function detectProductFromDoc(doc, pageUrl) {
   const microdata = detectFromMicrodata(doc);
   const meta = mapOgTags(collectMetaPairs(doc));
   const dom = detectFromDom(doc);
+  const shopify = await detectShopifyFields(doc, pageUrl);
 
   const merged = mergeFieldSources({}, jsonld.fields, microdata.fields, meta, dom.fields);
+  if (shopify) {
+    // Storefront JSON wypełnia luki (nie nadpisuje już wykrytych pól), ALE warianty nadpisuje
+    // zawsze — jsonld w najlepszym razie ma tylko licznik, Shopify ma pełne sku/cenę/dostępność.
+    for (const [field, spec] of Object.entries(shopify)) {
+      if (field === "variants" || !merged[field]) merged[field] = spec;
+    }
+  }
 
   const canonical = doc.querySelector('link[rel="canonical"]')?.getAttribute("href") || "";
   if (!merged.product_url && canonical) {
@@ -80,7 +109,7 @@ async function detectProductFromDoc(doc, pageUrl) {
   return {
     url: pageUrl,
     domain: (() => { try { return new URL(pageUrl).hostname; } catch { return ""; } })(),
-    detectedFrom: { jsonld: jsonld.found, microdata: microdata.found, meta: Object.keys(meta).length > 0, dom: dom.found },
+    detectedFrom: { jsonld: jsonld.found, microdata: microdata.found, meta: Object.keys(meta).length > 0, dom: dom.found, shopify: !!shopify },
     fields: merged,
   };
 }
@@ -397,6 +426,140 @@ async function fetchDoc(url, { retries = 1, timeoutMs = 15_000 } = {}) {
   throw lastError || new Error(`Nie udało się pobrać ${url}`);
 }
 
+const IFRAME_RENDER_TIMEOUT_MS = 9000;
+const IFRAME_POLL_INTERVAL_MS = 300;
+
+/**
+ * Ładuje `url` w ukrytym iframe i czeka, aż `isReady(doc)` zwróci true (albo upłynie timeout) —
+ * w odróżnieniu od fetchDoc (surowy HTML, BEZ wykonania JS strony), iframe faktycznie renderuje
+ * stronę jak przeglądarka: JS się wykonuje, React/Vue hydratuje, dane doładowane przez fetch po
+ * stronie klienta się pojawiają. To jedyny sposób obsłużenia w pełni client-renderowanych
+ * sklepów (headless Next.js/Vue bez SSR) BEZ zewnętrznego Playwrighta/backendu.
+ *
+ * Ograniczenia (świadome, nie do obejścia z poziomu rozszerzenia):
+ *  - Działa tylko dla stron TEGO SAMEGO originu co skanowana kategoria (poza tym `contentDocument`
+ *    jest i tak niedostępny z powodu Same-Origin Policy) — ale to i tak jedyne URL-e, za którymi
+ *    podąża auto-skan (patrz isSameOriginUrl/isSameListingAreaUrl), więc w praktyce nie ogranicza.
+ *  - Strona może zablokować ramkowanie (`X-Frame-Options`/CSP `frame-ancestors`) — wtedy iframe
+ *    się nie załaduje i po prostu odrzucamy wynik (fetchDocSmart spada z powrotem na statyczny fetch).
+ *  - Realnie wykonuje JS strony (analytics, liczniki wizyt) — nieunikniony koszt "renderowania
+ *    jak przeglądarka", identyczny jak w Playwright/Puppeteer.
+ * @param {string} url
+ * @param {(doc: Document) => boolean} isReady
+ * @param {number} timeoutMs
+ * @returns {Promise<Document>}
+ */
+function fetchDocViaIframe(url, isReady, timeoutMs = IFRAME_RENDER_TIMEOUT_MS) {
+  return new Promise((resolve, reject) => {
+    if (!document.body) {
+      reject(new Error("Brak document.body do wstawienia iframe."));
+      return;
+    }
+    const iframe = document.createElement("iframe");
+    iframe.style.cssText = "position:fixed;width:1px;height:1px;opacity:0.01;pointer-events:none;left:-9999px;top:-9999px;";
+    iframe.setAttribute("aria-hidden", "true");
+    iframe.setAttribute("tabindex", "-1");
+
+    let settled = false;
+    let pollTimer = null;
+    const cleanup = () => {
+      if (pollTimer) clearTimeout(pollTimer);
+      if (iframe.parentNode) iframe.parentNode.removeChild(iframe);
+    };
+    const finish = (doc, err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(hardTimer);
+      cleanup();
+      if (err) reject(err);
+      else resolve(doc);
+    };
+    const hardTimer = setTimeout(() => finish(null, new Error("Timeout renderowania strony w iframe")), timeoutMs);
+
+    const poll = (start) => {
+      let doc = null;
+      try {
+        doc = iframe.contentDocument;
+      } catch {
+        finish(null, new Error("Brak dostępu do zawartości iframe (inny origin?)."));
+        return;
+      }
+      const ready = !!doc && (isReady ? isReady(doc) : true);
+      if (ready || Date.now() - start >= timeoutMs) {
+        finish(doc, doc ? null : new Error("Iframe nie zwrócił dokumentu."));
+        return;
+      }
+      pollTimer = setTimeout(() => poll(start), IFRAME_POLL_INTERVAL_MS);
+    };
+
+    iframe.addEventListener("load", () => poll(Date.now()));
+    iframe.addEventListener("error", () => finish(null, new Error("Nie udało się załadować strony w iframe.")));
+    document.body.appendChild(iframe);
+    iframe.src = url;
+  });
+}
+
+/**
+ * Heurystyka "czy ten dokument ma jakąkolwiek treść produktową/listingową, czy to pusta skorupa
+ * SPA" — używana zarówno do decyzji "czy w ogóle próbować iframe" (statyczny fetch bez treści),
+ * jak i do sprawdzania "czy iframe już się dorenderował". `itemSelector`, gdy podany, jest
+ * najsilniejszym sygnałem (strona listingu); dla stron produktu (bez item_selector) polegamy na
+ * JSON-LD/microdata/OG/długości widocznego tekstu.
+ * @param {Document} doc
+ * @param {string} [itemSelector]
+ */
+function looksHydrated(doc, itemSelector) {
+  if (!doc) return false;
+  if (itemSelector) {
+    try {
+      if (doc.querySelectorAll(itemSelector).length > 0) return true;
+    } catch {
+      // nieprawidłowy selektor na tym dokumencie — spadamy na ogólniejsze sygnały niżej
+    }
+  }
+  if (doc.querySelector('script[type="application/ld+json"]')) return true;
+  if (doc.querySelector("[itemscope]")) return true;
+  if (doc.querySelector('meta[property="og:title"]')) return true;
+  return visibleBodyTextLength(doc) > 200; // pusta "skorupa" SPA to zwykle kilkadziesiąt znaków (spinner/"Loading...")
+}
+
+/** Długość WIDOCZNEGO tekstu w <body> — BEZ zawartości <script>/<style> (kod JS/CSS to nie
+ * treść strony; licząc go razem, pusta skorupa SPA z dłuższym inline-scriptem fałszywie
+ * wyglądałaby na "już zrenderowaną" — realny bug znaleziony przy testowaniu tej funkcji). */
+function visibleBodyTextLength(doc) {
+  const body = doc.body;
+  if (!body) return 0;
+  const clone = body.cloneNode(true);
+  clone.querySelectorAll("script, style").forEach((el) => el.remove());
+  return (clone.textContent || "").trim().length;
+}
+
+/**
+ * Statyczny fetch + fallback do iframe, TYLKO gdy statyczny wynik wygląda na nierozhydrowaną
+ * skorupę SPA (React/Vue/Next.js bez SSR). Dla zdecydowanej większości sklepów (SSR/klasyczny
+ * render serwerowy) iframe nigdy się nie uruchamia — dodatkowy koszt (pełne renderowanie strony,
+ * łącznie z jej JS/CSS/obrazkami) ponosimy WYŁĄCZNIE tam, gdzie statyczny fetch faktycznie
+ * zawodzi.
+ * @param {string} url
+ * @param {string} [itemSelector] - podaj dla stron listingu; pomiń dla stron pojedynczego produktu
+ */
+async function fetchDocSmart(url, itemSelector) {
+  const staticDoc = await fetchDoc(url);
+  if (looksHydrated(staticDoc, itemSelector)) {
+    return { doc: staticDoc, renderedViaIframe: false };
+  }
+  try {
+    const rendered = await fetchDocViaIframe(url, (doc) => looksHydrated(doc, itemSelector));
+    if (looksHydrated(rendered, itemSelector)) {
+      return { doc: rendered, renderedViaIframe: true };
+    }
+  } catch {
+    // iframe też zawiódł (zablokowane ramkowanie, timeout, inny origin) — zostajemy przy
+    // statycznym dokumencie; dalsza ekstrakcja i tak ma własne fallbacki (linki wg score'u itp.).
+  }
+  return { doc: staticDoc, renderedViaIframe: false };
+}
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -522,8 +685,8 @@ async function autoClickThroughPages(pagination, listing, baseUrl, resolveUrl, p
  * jedyny sposób, żeby obsłużyć load-more bez Playwrighta: fetch()+DOMParser (używany do
  * kolejnych stron next_link) nie wykonuje JS-a strony, więc nigdy by nie zobaczył efektu
  * kliknięcia. Działa TYLKO na bieżącej, żywej stronie (nie na fetchowanych kopiach) i tylko
- * dla trybu "load_more" z rozpoznanym przyciskiem — infinite_scroll (doładowanie na scrollu,
- * bez jawnego przycisku) zostaje nieobsłużone, bo nie ma tu jednego niezawodnego triggera.
+ * dla trybu "load_more" z rozpoznanym przyciskiem — prawdziwy infinite scroll (doładowanie na
+ * scrollu, bez jawnego przycisku) obsługuje osobna funkcja niżej (autoScrollForMoreContent).
  * Zatrzymuje się, gdy: przycisk zniknie/będzie disabled/niewidoczny, osiągniemy limit
  * produktów, dwa kliknięcia z rzędu nie dadzą przyrostu kart, albo user kliknie "Stop".
  */
@@ -557,6 +720,47 @@ async function autoExpandLoadMore(pagination, itemSelector, productCap) {
     await sleep(REQUEST_DELAY_MS); // uprzejmość wobec serwera, tak jak przy fetchowaniu kolejnych stron
   }
   return { clicks, finalCount: lastCount };
+}
+
+const INFINITE_SCROLL_PROBE_TIMEOUT_MS = 1500; // krótka, tania sonda — czy scroll W OGÓLE coś robi
+
+/**
+ * Ostatni resort, gdy detectPaginationFromDoc nie znalazł ŻADNEGO mechanizmu (mode "none"):
+ * przewija żywą stronę do samego dołu i sprawdza, czy pojawiają się nowe karty produktów —
+ * dokładnie ten sam trigger, którego używa prawdziwy "infinite scroll" (IntersectionObserver na
+ * sentinelu blisko dołu listy, albo zwykły listener na scroll/resize). Zamiast zgadywać z góry
+ * "czy ta strona ma infinite scroll" (nie ma na to jednego niezawodnego sygnału DOM), po prostu
+ * PRÓBUJEMY i obserwujemy efekt — jeśli nic się nie zmienia po jednej krótkiej sondzie (1.5s),
+ * kończymy natychmiast, żeby nie dokładać kosztu do zwykłych, skończonych list (najczęstszy
+ * przypadek). Jeśli sonda wykaże przyrost, kontynuujemy pełnym cyklem jak przy load-more.
+ */
+async function autoScrollForMoreContent(itemSelector, productCap) {
+  if (!itemSelector) return { scrolls: 0, finalCount: 0 };
+  let lastCount = safeCount(itemSelector);
+
+  window.scrollTo(0, document.body.scrollHeight);
+  await waitForCountIncrease(itemSelector, lastCount, INFINITE_SCROLL_PROBE_TIMEOUT_MS);
+  if (safeCount(itemSelector) <= lastCount) {
+    return { scrolls: 0, finalCount: lastCount }; // scroll nic nie zmienił — zwykła, skończona lista
+  }
+
+  let scrolls = 1;
+  let stableRounds = 0;
+  lastCount = safeCount(itemSelector);
+
+  while (scrolls < LOAD_MORE_MAX_CLICKS && stableRounds < LOAD_MORE_STABLE_ROUNDS_LIMIT && !scanStopRequested) {
+    if (Number.isFinite(productCap) && productCap > 0 && lastCount >= productCap) break;
+    sendProgress({ phase: "listing", pagesVisited: 1, pagesTotal: 1, productsFound: lastCount });
+
+    window.scrollTo(0, document.body.scrollHeight);
+    scrolls += 1;
+    await waitForCountIncrease(itemSelector, lastCount, LOAD_MORE_WAIT_TIMEOUT_MS);
+    const newCount = safeCount(itemSelector);
+    stableRounds = newCount > lastCount ? 0 : stableRounds + 1;
+    lastCount = newCount;
+    await sleep(REQUEST_DELAY_MS);
+  }
+  return { scrolls, finalCount: lastCount };
 }
 
 /**
@@ -646,7 +850,16 @@ async function scanCatalog({ maxPages, maxProducts, useAI, apiKey, aiModel, aiPr
     } else {
       warnings.push(`Wykryto przycisk "następna strona" bez normalnego linku (paginacja JS/AJAX), ale nie udało się przejść dalej automatycznie — sprawdź selektor ręcznie.`);
     }
-  } else if (pagination.mode !== "none" && !isAutoFollowablePagination(pagination)) {
+  } else if (pagination.mode === "none") {
+    // Brak next_link/load_more/click_next nie znaczy jeszcze "to jest cała lista" — część
+    // sklepów doładowuje kolejne karty samym scrollem (IntersectionObserver na sentinelu),
+    // bez żadnego widocznego przycisku do wykrycia z góry. Sonda jest tania (patrz
+    // INFINITE_SCROLL_PROBE_TIMEOUT_MS) — dla zwykłych, skończonych list kończy się od razu.
+    const scrollResult = await autoScrollForMoreContent(listing.item_selector, productCap);
+    if (scrollResult.scrolls > 0) {
+      warnings.push(`Strona doładowuje produkty przy scrollowaniu (infinite scroll bez przycisku) — przewinięto ${scrollResult.scrolls}× na żywej stronie, zebrano do ${scrollResult.finalCount} kart.`);
+    }
+  } else if (!isAutoFollowablePagination(pagination)) {
     warnings.push(`Wykryto paginację typu "${pagination.mode}" (experimental) — spróbuję jeszcze linki z href/numery stron, ale przyciski wymagające JS mogą wymagać trybu Playwright.`);
   }
 
@@ -661,6 +874,7 @@ async function scanCatalog({ maxPages, maxProducts, useAI, apiKey, aiModel, aiPr
   let pagesVisited = 0;
   let productUrls = dedupe(preCollectedProductUrls.map(normalizeCrawlUrl).filter((url) => url && isSameOriginUrl(url, baseUrl)));
   let queuedBeyondLimit = false;
+  let iframeRenderedListingPages = 0;
 
   while (pendingPageUrls.length > 0 && pagesVisited < effectiveMaxPages && !scanStopRequested) {
     const currentUrl = pendingPageUrls.shift();
@@ -672,7 +886,11 @@ async function scanCatalog({ maxPages, maxProducts, useAI, apiKey, aiModel, aiPr
     if (!currentDoc) {
       await sleep(REQUEST_DELAY_MS);
       try {
-        currentDoc = await fetchDoc(currentUrl);
+        // fetchDocSmart: statyczny fetch, a jeśli to pusta skorupa SPA (Next.js/Vue bez SSR) —
+        // dorenderowanie w ukrytym iframe, żeby zobaczyć to, co widziałaby żywa przeglądarka.
+        const result = await fetchDocSmart(currentUrl, listing.item_selector);
+        currentDoc = result.doc;
+        if (result.renderedViaIframe) iframeRenderedListingPages += 1;
       } catch (err) {
         warnings.push(`Nie udało się pobrać strony listingu ${currentUrl}: ${err.message || err}`);
         continue;
@@ -739,21 +957,35 @@ async function scanCatalog({ maxPages, maxProducts, useAI, apiKey, aiModel, aiPr
   if (productUrls.length === 0) {
     warnings.push("Nie znaleziono URL-i produktów na listingu — selector kart lub linków prawdopodobnie wymaga ręcznej korekty.");
   }
+  if (iframeRenderedListingPages > 0) {
+    warnings.push(`${iframeRenderedListingPages} stron(y) listingu wymagały dorenderowania w ukrytym iframe (strona nie działa bez JS-a) — może to spowolnić skan, ale pozwala zobaczyć produkty niewidoczne w statycznym HTML-u.`);
+  }
 
   // 2. Pola produktowe: detekcja na próbce (do 3 kart) — wygrywa najlepsza (najwięcej niepustych pól),
   //    potem to samo źródło pól stosujemy do KAŻDEGO produktu (jsonld/microdata path'y są strukturalne,
   //    css/dom selektory generalizują się na kartach z tego samego szablonu).
   const sampleUrls = capArray(productUrls, 3);
   const samples = []; // {fields, doc, url}[] — trzymamy doc, żeby ewentualny fallback AI (niżej) mógł zweryfikować selektor na tej samej stronie
+  let iframeRenderedSamples = 0;
   for (const url of sampleUrls) {
     try {
-      const doc = url === baseUrl ? document : await fetchDoc(url);
+      let doc;
+      if (url === baseUrl) {
+        doc = document;
+      } else {
+        const result = await fetchDocSmart(url);
+        doc = result.doc;
+        if (result.renderedViaIframe) iframeRenderedSamples += 1;
+      }
       const detected = await detectProductFromDoc(doc, url);
       samples.push({ fields: detected.fields, doc, url });
     } catch {
       // próbka się nie powiodła — próbujemy kolejnej
     }
     await sleep(REQUEST_DELAY_MS);
+  }
+  if (iframeRenderedSamples > 0) {
+    warnings.push(`${iframeRenderedSamples} próbek produktów wymagało dorenderowania w ukrytym iframe (strona produktu nie działa bez JS-a).`);
   }
   const bestSample = pickBestSample(samples.map((s) => s.fields));
   const bestSamplePair = samples.find((s) => s.fields === bestSample);
@@ -803,10 +1035,18 @@ async function scanCatalog({ maxPages, maxProducts, useAI, apiKey, aiModel, aiPr
   const products = [];
   const failedProductErrors = [];
   let done = 0;
+  let iframeRenderedProducts = 0;
   for (const url of productUrls) {
     if (scanStopRequested) break;
     try {
-      const doc = url === baseUrl ? document : await fetchDoc(url);
+      let doc;
+      if (url === baseUrl) {
+        doc = document;
+      } else {
+        const result = await fetchDocSmart(url);
+        doc = result.doc;
+        if (result.renderedViaIframe) iframeRenderedProducts += 1;
+      }
       const detected = await detectProductFromDoc(doc, url);
       // Field mapa z próbki generalizuje selektory, ale wartości muszą pochodzić z aktualnego
       // produktu. Świeża detekcja strony nadal wygrywa, bo zwykle ma JSON-LD/meta dla tej karty.
@@ -828,6 +1068,9 @@ async function scanCatalog({ maxPages, maxProducts, useAI, apiKey, aiModel, aiPr
   if (failedProductErrors.length > 0) {
     const firstError = failedProductErrors[0];
     warnings.push(`Nie udało się pobrać ${failedProductErrors.length}/${productUrls.length} produktów. Pierwszy błąd: ${firstError}`);
+  }
+  if (iframeRenderedProducts > 0) {
+    warnings.push(`${iframeRenderedProducts}/${productUrls.length} stron produktów wymagało dorenderowania w ukrytym iframe (strony nie działają bez JS-a) — skan mógł być przez to wolniejszy.`);
   }
 
   return {

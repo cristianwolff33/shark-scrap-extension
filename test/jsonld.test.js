@@ -130,6 +130,39 @@ test("offers jako tablica > 1 elementów oznacza warianty", () => {
   assert.match(fields.variants.value, /3/);
 });
 
+test("offers[] z sku/price/availability per wariant trafiają do fields.variants.values (nie tylko licznik)", () => {
+  const withVariants = {
+    ...PRODUCT,
+    offers: [
+      { name: "Rozmiar S", sku: "X200-S", price: "199.00", priceCurrency: "PLN", availability: "https://schema.org/InStock" },
+      { name: "Rozmiar M", sku: "X200-M", price: "199.00", priceCurrency: "PLN", availability: "OutOfStock" },
+      { sku: "X200-L", price: "219.00" }, // bez name/availability — nie powinno wywrócić reszty
+    ],
+  };
+  const fields = mapProductNode(withVariants);
+  assert.equal(fields.variants.values.length, 3);
+  assert.deepEqual(fields.variants.values[0], { name: "Rozmiar S", sku: "X200-S", price: "199.00", priceCurrency: "PLN", availability: "Dostępny" });
+  assert.equal(fields.variants.values[1].availability, "Niedostępny");
+  assert.equal(fields.variants.values[2].name, "Wariant 3"); // fallback nazwy gdy brak name
+  assert.equal(fields.variants.values[2].sku, "X200-L");
+});
+
+test("hasVariant (tablica Product/wariantów) też buduje pełne fields.variants.values", () => {
+  const withHasVariant = {
+    ...PRODUCT,
+    offers: undefined,
+    hasVariant: [
+      { name: "Czerwony", sku: "X200-RED", offers: { price: "199.00", priceCurrency: "PLN" } },
+      { name: "Niebieski", sku: "X200-BLU", offers: { price: "209.00", priceCurrency: "PLN" } },
+    ],
+  };
+  const fields = mapProductNode(withHasVariant);
+  assert.equal(fields.variants.path, "hasVariant");
+  assert.equal(fields.variants.values.length, 2);
+  assert.equal(fields.variants.values[0].sku, "X200-RED");
+  assert.equal(fields.variants.values[1].price, "209.00");
+});
+
 test("brak węzła Product zwraca found:false", () => {
   const result = detectFromJsonLd([JSON.stringify({ "@type": "WebSite", name: "x" })]);
   assert.equal(result.found, false);

@@ -39,7 +39,7 @@ const JOB_STATUS_LABELS = {
   timeout: "Timeout",
 };
 
-/** @type {{tabId:number, domain:string, url:string, config: import('../lib/schema.js').ScraperConfig, projectId: string|null, scanning: boolean, scanProducts: any[], adapterRows: any[]|null, outputDirHandle: any, ai: {provider:string, openaiApiKey:string, openaiModel:string, anthropicApiKey:string, anthropicModel:string}, bridge: {mode:string, baseUrl:string, localBaseUrl:string, cloudBaseUrl:string, cloudUserId:string, connected:boolean, jobId:string|null}}} */
+/** @type {{tabId:number, domain:string, url:string, config: import('../lib/schema.js').ScraperConfig, projectId: string|null, scanning: boolean, downloadingFull: boolean, scanProducts: any[], adapterRows: any[]|null, outputDirHandle: any, ai: {provider:string, openaiApiKey:string, openaiModel:string, anthropicApiKey:string, anthropicModel:string}, bridge: {mode:string, baseUrl:string, localBaseUrl:string, cloudBaseUrl:string, cloudUserId:string, connected:boolean, jobId:string|null}}} */
 const state = {
   tabId: null,
   domain: "",
@@ -47,6 +47,7 @@ const state = {
   config: null,
   projectId: null,
   scanning: false,
+  downloadingFull: false,
   scanProducts: [],
   adapterRows: null,
   outputDirHandle: null,
@@ -605,6 +606,46 @@ async function onChangeFolder() {
   }
 }
 
+const BLOB_URL_FALLBACK_REVOKE_MS = 60_000; // zabezpieczenie, gdyby chrome.downloads.onChanged z jakiegoś powodu nigdy nie doleciało
+
+/**
+ * Pobiera Blob przez chrome.downloads, zwalniając Object URL dopiero gdy Chrome POTWIERDZI
+ * (chrome.downloads.onChanged), że pobieranie faktycznie się zakończyło — a nie po sztywnym,
+ * krótkim czasie na pałę. Ten sztywny czas (wcześniej 10s) na wolniejszym sprzęcie — wolny dysk,
+ * antywirus skanujący każdy pobrany plik — potrafił upłynąć ZANIM Chrome zdążył faktycznie
+ * odczytać blob: URL, przez co pobieranie lądowało pod losowo wygenerowaną nazwą zamiast
+ * właściwej (dokładnie ten objaw, który user zgłosił na innym komputerze).
+ * @param {Blob} blob
+ * @param {string} filename - ścieżka względna, patrz writeOutput/onExportImages
+ */
+async function downloadBlobViaChrome(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  let downloadId;
+  try {
+    downloadId = await chrome.downloads.download({ url, filename, saveAs: false });
+  } catch (err) {
+    URL.revokeObjectURL(url);
+    throw err;
+  }
+  if (typeof downloadId !== "number") {
+    setTimeout(() => URL.revokeObjectURL(url), BLOB_URL_FALLBACK_REVOKE_MS);
+    return;
+  }
+  let settled = false;
+  const cleanup = () => {
+    if (settled) return;
+    settled = true;
+    chrome.downloads.onChanged.removeListener(onChanged);
+    URL.revokeObjectURL(url);
+  };
+  function onChanged(delta) {
+    if (delta.id !== downloadId) return;
+    if (delta.state?.current === "complete" || delta.state?.current === "interrupted") cleanup();
+  }
+  chrome.downloads.onChanged.addListener(onChanged);
+  setTimeout(cleanup, BLOB_URL_FALLBACK_REVOKE_MS);
+}
+
 /**
  * Zapisuje Blob jako plik <folder wyjściowy>/<nazwa-strony>/<filename> — albo, gdy File System
  * Access jest niedostępny (typowe dla side panelu rozszerzenia — Chrome nie pozwala tam wywołać
@@ -622,12 +663,7 @@ async function writeOutput(filename, blob) {
     await fsdir.writeFile(domainDir, filename, blob);
     return;
   }
-  const url = URL.createObjectURL(blob);
-  try {
-    await chrome.downloads.download({ url, filename: `${domainSlug}/${filename}`, saveAs: false });
-  } finally {
-    setTimeout(() => URL.revokeObjectURL(url), 10_000);
-  }
+  await downloadBlobViaChrome(blob, `${domainSlug}/${filename}`);
 }
 
 async function ensureScanResults() {
@@ -817,15 +853,10 @@ async function onExportImages() {
       progressEl.textContent = `Pakowanie ${zipEntries.length} zdjęć do jednego pliku ZIP…`;
       const zipBlob = imagesToZipBlob(zipEntries);
       zipFilename = `${domainSlug}-zdjecia.zip`;
-      const objUrl = URL.createObjectURL(zipBlob);
-      try {
-        // Ten sam `${domainSlug}/` co CSV/XLSX/JSON w writeOutput() — wszystko z jednego skanu
-        // ląduje w jednym folderze bez względu na to, którego przycisku (CSV/XLSX/JSON/Full)
-        // user użył.
-        await chrome.downloads.download({ url: objUrl, filename: `${domainSlug}/${zipFilename}`, saveAs: false });
-      } finally {
-        setTimeout(() => URL.revokeObjectURL(objUrl), 10_000);
-      }
+      // Ten sam `${domainSlug}/` co CSV/XLSX/JSON w writeOutput() — wszystko z jednego skanu
+      // ląduje w jednym folderze bez względu na to, którego przycisku (CSV/XLSX/JSON/Full)
+      // user użył.
+      await downloadBlobViaChrome(zipBlob, `${domainSlug}/${zipFilename}`);
     }
 
     const doneNote = useFsDir ? `${done} zdjęć zapisanych` : zipFilename ? `${done} zdjęć spakowanych do ${zipFilename}` : "0 zdjęć";
@@ -846,6 +877,14 @@ async function onDownloadFull() {
   const btn = el("export-full-btn");
   btn.disabled = true;
   setExportButtonsDisabled(true);
+  // Osobna flaga (NIE state.scanning — to zeruje się samo w finally onScanCatalog, więc
+  // zagnieżdżone wywołanie skanu przez ensureScanResults poniżej i tak by je nadpisało) trzymana
+  // przez CAŁY ciąg CSV+XLSX+JSON+zdjęcia. Bez niej zdarzenie chrome.tabs.onUpdated spóźnione o
+  // ułamek sekundy (np. pushState wywołany klikaniem "następna strona" pod koniec skanu — patrz
+  // applyActiveTab) mogłoby dolecieć akurat w trakcie zapisywania plików i zresetować
+  // state.config w połowie eksportu — dokładnie tak różne pliki z jednego "Download Full"
+  // trafiały do różnych/złych folderów.
+  state.downloadingFull = true;
   try {
     if (!(await ensureScanResults())) return;
     await onExportCsv();
@@ -857,6 +896,7 @@ async function onDownloadFull() {
   } catch (err) {
     toastError(err);
   } finally {
+    state.downloadingFull = false;
     btn.disabled = false;
     setExportButtonsDisabled(false);
   }
@@ -949,16 +989,7 @@ async function downloadCloudFrameworkOutput(downloadUrl, filename) {
     throw new Error(detail || `Cloud download HTTP ${res.status}`);
   }
   const blob = await res.blob();
-  const objUrl = URL.createObjectURL(blob);
-  try {
-    await chrome.downloads.download({
-      url: objUrl,
-      filename: `shark-scrap/cloud/${safeFrameworkDownloadName(filename)}`,
-      saveAs: false,
-    });
-  } finally {
-    setTimeout(() => URL.revokeObjectURL(objUrl), 10_000);
-  }
+  await downloadBlobViaChrome(blob, `shark-scrap/cloud/${safeFrameworkDownloadName(filename)}`);
 }
 
 async function onFrameworkOutputClick(event) {
@@ -1257,6 +1288,15 @@ async function onClearAiSettings() {
 async function applyActiveTab(tab, { silent = false } = {}) {
   if (!tab || !tab.url || !/^https?:/i.test(tab.url)) return; // pomijamy chrome://, about:blank itp. — nie ma tam czego skanować
 
+  // W trakcie skanu/Download Full sama skanowana strona potrafi zmienić swój URL przez
+  // history.pushState (np. paginacja click_next albo dowolna SPA-owa nawigacja klienta) — Chrome
+  // zgłasza to jako zwykłą nawigację (chrome.tabs.onUpdated z changeInfo.url), nieodróżnialną tu
+  // od prawdziwej zmiany strony przez usera. Bez tego guardu resetowalibyśmy state.config/wyniki
+  // W POŁOWIE skanu albo eksportu — a stąd właśnie brały się pliki z jednego "Download Full"
+  // lądujące w różnych/złych folderach. Zdarzenie po prostu ignorujemy; panel dogoni realny stan
+  // karty przy najbliższym zdarzeniu PO zakończeniu skanu/eksportu.
+  if (state.scanning || state.downloadingFull) return;
+
   const isSameTabAndUrl = tab.id === state.tabId && tab.url === state.url;
   if (isSameTabAndUrl) return;
 
@@ -1266,7 +1306,6 @@ async function applyActiveTab(tab, { silent = false } = {}) {
   state.domain = new URL(tab.url).hostname;
 
   // Nowa karta/nawigacja = poprzedni wynik skanu dotyczy INNEJ strony, nie ma sensu go trzymać.
-  state.scanning = false;
   state.scanProducts = [];
   state.adapterRows = null;
 

@@ -10,6 +10,7 @@ import {
   groupSignature,
   groupSignatureForAttr,
   scoreProductLinkCandidate,
+  isNavigableHref,
   PRICE_LIKE_RE,
 } from "../lib/listing.js";
 
@@ -143,4 +144,15 @@ test("scoreProductLinkCandidate odrzuca dodatkowe warianty złych linków (quick
   assert.ok(scoreProductLinkCandidate({ href: "/quick-view/123", text: "Szybki podgląd", hasImage: true, hasPriceNearby: true }) < 0);
   assert.ok(scoreProductLinkCandidate({ href: "/porownaj?id=1", text: "Porównaj", hasImage: true, hasPriceNearby: true }) < 0);
   assert.ok(scoreProductLinkCandidate({ href: "/ulubione/dodaj/1", text: "Dodaj do ulubionych", hasImage: true, hasPriceNearby: true }) < 0);
+});
+
+test("isNavigableHref odrzuca placeholdery JS ('#', 'javascript:...'), akceptuje realne URL-e", () => {
+  assert.equal(isNavigableHref("#"), false);
+  assert.equal(isNavigableHref(""), false);
+  assert.equal(isNavigableHref(null), false);
+  assert.equal(isNavigableHref("javascript:void(0)"), false);
+  assert.equal(isNavigableHref("JavaScript:loadPage(2)"), false);
+  assert.equal(isNavigableHref("/kategoria?page=2"), true);
+  assert.equal(isNavigableHref("https://sklep.pl/kategoria/strona/2"), true);
+  assert.equal(isNavigableHref("#produkty"), true); // kotwica z realną nazwą (nie sam placeholder "#") — traktujemy jako potencjalnie nawigowalną
 });

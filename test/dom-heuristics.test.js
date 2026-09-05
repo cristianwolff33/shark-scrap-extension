@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { looksLikeGpsrHeading } from "../lib/dom-heuristics.js";
+import { looksLikeGpsrHeading, detectCurrencyFromText, firstUrlFromSrcset, pickImageUrl } from "../lib/dom-heuristics.js";
 
 test("looksLikeGpsrHeading rozpoznaje literalny skrót GPSR (dowolna wielkość liter)", () => {
   assert.ok(looksLikeGpsrHeading("GPSR"));
@@ -20,4 +20,45 @@ test("looksLikeGpsrHeading odrzuca niepowiązane nagłówki", () => {
   assert.equal(looksLikeGpsrHeading("Dostawa i zwroty"), false);
   assert.equal(looksLikeGpsrHeading(""), false);
   assert.equal(looksLikeGpsrHeading(undefined), false);
+});
+
+test("detectCurrencyFromText rozpoznaje popularne waluty PL/EU z tekstu ceny", () => {
+  assert.equal(detectCurrencyFromText("199,99 zł"), "PLN");
+  assert.equal(detectCurrencyFromText("od 49 EUR"), "EUR");
+  assert.equal(detectCurrencyFromText("€19.99"), "EUR");
+  assert.equal(detectCurrencyFromText("$19.99"), "USD");
+  assert.equal(detectCurrencyFromText("£15"), "GBP");
+  assert.equal(detectCurrencyFromText("199 Kč"), "CZK");
+  assert.equal(detectCurrencyFromText("1990 Ft"), "HUF");
+});
+
+test("detectCurrencyFromText zwraca null gdy nic nie pasuje", () => {
+  assert.equal(detectCurrencyFromText("199,99"), null);
+  assert.equal(detectCurrencyFromText(""), null);
+  assert.equal(detectCurrencyFromText(undefined), null);
+});
+
+test("firstUrlFromSrcset bierze pierwszy adres z listy kandydatów", () => {
+  assert.equal(firstUrlFromSrcset("/img-320.jpg 320w, /img-640.jpg 640w"), "/img-320.jpg");
+  assert.equal(firstUrlFromSrcset("/img-1x.jpg 1x, /img-2x.jpg 2x"), "/img-1x.jpg");
+  assert.equal(firstUrlFromSrcset(""), "");
+  assert.equal(firstUrlFromSrcset(undefined), "");
+});
+
+function fakeImgEl(attrs) {
+  return { getAttribute: (name) => (Object.prototype.hasOwnProperty.call(attrs, name) ? attrs[name] : null) };
+}
+
+test("pickImageUrl preferuje atrybuty lazy-load nad src-placeholderem", () => {
+  // Realny bug: src to placeholder (base64 blank gif), prawdziwy adres jest w data-src —
+  // wcześniejsza wersja (src PIERWSZY) zwracała placeholder.
+  const el = fakeImgEl({ src: "data:image/gif;base64,R0lGOD==", "data-src": "/produkty/x200.jpg" });
+  assert.equal(pickImageUrl(el), "/produkty/x200.jpg");
+});
+
+test("pickImageUrl spada na data-original, potem data-srcset, potem src", () => {
+  assert.equal(pickImageUrl(fakeImgEl({ "data-original": "/a.jpg", src: "/placeholder.gif" })), "/a.jpg");
+  assert.equal(pickImageUrl(fakeImgEl({ "data-srcset": "/b-320.jpg 320w", src: "/placeholder.gif" })), "/b-320.jpg");
+  assert.equal(pickImageUrl(fakeImgEl({ src: "/c.jpg" })), "/c.jpg");
+  assert.equal(pickImageUrl(fakeImgEl({})), "");
 });

@@ -265,7 +265,7 @@ function readFormIntoConfig() {
     next_selector: el("next-selector-input").value.trim(),
     load_more_selector: el("load-more-selector-input").value.trim(),
     max_pages: Number(el("max-pages-input").value) || 50,
-    experimental: pMode === "load_more" || pMode === "infinite_scroll",
+    experimental: pMode === "load_more" || pMode === "click_next" || pMode === "infinite_scroll",
   };
 
   c.image_links.public_base_url = normalizeImageTemplate(el("image-base-url-input").value);

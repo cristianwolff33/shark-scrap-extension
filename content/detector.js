@@ -189,7 +189,7 @@ function isDisabledCandidateEl(el) {
 }
 
 async function detectPaginationFromDoc(doc) {
-  const { pickNextLinkCandidate, pickLoadMoreCandidate } = await loadLib("listing.js");
+  const { pickNextLinkCandidate, pickLoadMoreCandidate, isNavigableHref } = await loadLib("listing.js");
   const { generateSelector } = await loadLib("selectors.js");
 
   const links = Array.from(doc.querySelectorAll("a")).map((a) => ({
@@ -217,11 +217,19 @@ async function detectPaginationFromDoc(doc) {
   const next = pickNextLinkCandidate(links);
   const loadMore = pickLoadMoreCandidate(buttons);
 
-  if (next) {
+  // Kandydat "next" istnieje, ale jego href to placeholder ("#"/"javascript:...") — typowe dla
+  // paginacji sterowanej czystym JS/AJAX bez przeładowania strony (częste w React/Vue). Taki
+  // link jest bezużyteczny dla fetch()+DOMParser (kolejna strona wygląda identycznie jak
+  // pierwsza), ale da się go realnie kliknąć na żywej stronie — stąd osobny tryb "click_next"
+  // zamiast mylącego "next_link", który sugerowałby bezpieczne podążanie przez URL.
+  if (next && isNavigableHref(next.el.getAttribute("href"))) {
     return { mode: "next_link", next_selector: generateSelector(next.el), load_more_selector: "", experimental: false };
   }
   if (loadMore) {
     return { mode: "load_more", next_selector: "", load_more_selector: generateSelector(loadMore.el), experimental: true };
+  }
+  if (next) {
+    return { mode: "click_next", next_selector: generateSelector(next.el), load_more_selector: "", experimental: true };
   }
   return { mode: "none", next_selector: "", load_more_selector: "", experimental: false };
 }
@@ -445,6 +453,69 @@ function waitForCountIncrease(selector, previousCount, timeoutMs) {
   });
 }
 
+/** Czeka aż `extractUrls()` zwróci inny zestaw URL-i niż `previousKey` (strona podmieniła treść
+ * po kliknięciu "następna strona") albo upłynie timeout. */
+function waitForUrlSetChange(extractUrls, previousKey, timeoutMs) {
+  return new Promise((resolve) => {
+    const start = Date.now();
+    const check = () => {
+      const currentKey = extractUrls().join("|");
+      if ((currentKey && currentKey !== previousKey) || scanStopRequested) {
+        resolve(currentKey);
+        return;
+      }
+      if (Date.now() - start >= timeoutMs) {
+        resolve(null);
+        return;
+      }
+      setTimeout(check, LOAD_MORE_POLL_INTERVAL_MS);
+    };
+    check();
+  });
+}
+
+/**
+ * Odpowiednik autoExpandLoadMore, ale dla paginacji "click_next" — przycisk "następna strona"
+ * sterowany JS-em/AJAX-em (href to placeholder, patrz isNavigableHref w listing.js), gdzie
+ * kliknięcie PODMIENIA karty produktów zamiast je dokładać (więc licznik kart nie rośnie —
+ * porównujemy sam ZESTAW zebranych URL-i, nie jego rozmiar). Działa tylko na żywej stronie,
+ * z tych samych powodów co autoExpandLoadMore.
+ */
+async function autoClickThroughPages(pagination, listing, baseUrl, resolveUrl, priceLikeRe, pickBestProductLinkCandidate, productCap, maxPages) {
+  if (!pagination || pagination.mode !== "click_next" || !pagination.next_selector) {
+    return { clicks: 0, collectedUrls: [] };
+  }
+  const extractCurrent = () =>
+    extractItemUrlsFromDoc(document, listing.item_selector, listing.url_selector, listing.url_attribute, baseUrl, resolveUrl, priceLikeRe, pickBestProductLinkCandidate);
+
+  let allUrls = extractCurrent();
+  let previousKey = allUrls.join("|");
+  let clicks = 0;
+
+  while (clicks < Math.max(maxPages - 1, 0) && allUrls.length < productCap && !scanStopRequested) {
+    let btn;
+    try {
+      btn = document.querySelector(pagination.next_selector);
+    } catch {
+      break;
+    }
+    if (!btn || isDisabledCandidateEl(btn) || btn.offsetParent === null) break; // brak/disabled/niewidoczny = ostatnia strona
+
+    btn.scrollIntoView({ block: "center", behavior: "instant" });
+    btn.click();
+    clicks += 1;
+    sendProgress({ phase: "listing", pagesVisited: clicks + 1, pagesTotal: maxPages, productsFound: allUrls.length });
+
+    const newKey = await waitForUrlSetChange(extractCurrent, previousKey, LOAD_MORE_WAIT_TIMEOUT_MS);
+    if (newKey === null) break; // brak zmiany po kliknięciu w rozsądnym czasie = koniec paginacji
+
+    previousKey = newKey;
+    allUrls = Array.from(new Set([...allUrls, ...extractCurrent()]));
+    await sleep(REQUEST_DELAY_MS);
+  }
+  return { clicks, collectedUrls: allUrls };
+}
+
 /**
  * Realnie klika przycisk "Załaduj więcej" na ŻYWEJ stronie (tej samej karcie, w której user
  * uruchomił skan) i czeka, aż DOM doładuje kolejne karty — tak jak zrobiłby to człowiek. To
@@ -538,6 +609,9 @@ async function scanCatalog({ maxPages, maxProducts, useAI, apiKey, aiModel, aiPr
   const effectiveMaxPages = Number.isFinite(maxPages) && maxPages > 0 ? maxPages : (pagination.max_pages || 20);
   const productCap = Math.min(Number.isFinite(maxProducts) && maxProducts > 0 ? maxProducts : HARD_PRODUCT_CAP, HARD_PRODUCT_CAP);
 
+  let preCollectedProductUrls = [];
+  let clickThroughPages = 0;
+
   if (pagination.mode === "load_more") {
     sendProgress({ phase: "listing", pagesVisited: 1, pagesTotal: 1, productsFound: safeCount(listing.item_selector) });
     const expandResult = await autoExpandLoadMore(pagination, listing.item_selector, productCap);
@@ -546,17 +620,42 @@ async function scanCatalog({ maxPages, maxProducts, useAI, apiKey, aiModel, aiPr
     } else {
       warnings.push(`Wykryto przycisk "Załaduj więcej", ale nie udało się go automatycznie kliknąć/doładować kolejnych produktów — sprawdź selektor ręcznie.`);
     }
+  } else if (pagination.mode === "click_next") {
+    // Przycisk "następna strona" bez prawdziwego href (sterowany JS-em/AJAX) — jedyny sposób to
+    // kliknąć na żywej stronie i zbierać URL-e produktów po kolei, strona po stronie (patrz
+    // autoClickThroughPages: w odróżnieniu od load-more, tu treść jest PODMIENIANA, nie dokładana).
+    sendProgress({ phase: "listing", pagesVisited: 1, pagesTotal: effectiveMaxPages, productsFound: safeCount(listing.item_selector) });
+    const clickResult = await autoClickThroughPages(
+      pagination,
+      listing,
+      baseUrl,
+      resolveUrl,
+      PRICE_LIKE_RE,
+      pickBestProductLinkCandidate,
+      productCap,
+      effectiveMaxPages
+    );
+    preCollectedProductUrls = clickResult.collectedUrls;
+    clickThroughPages = clickResult.clicks;
+    if (clickResult.clicks > 0) {
+      warnings.push(`Kliknięto "następna strona" ${clickResult.clicks}× na żywej stronie (paginacja bez zwykłych linków, sterowana JS-em) — zebrano ${preCollectedProductUrls.length} URL-i produktów z ${clickResult.clicks + 1} stron.`);
+    } else {
+      warnings.push(`Wykryto przycisk "następna strona" bez normalnego linku (paginacja JS/AJAX), ale nie udało się przejść dalej automatycznie — sprawdź selektor ręcznie.`);
+    }
   } else if (pagination.mode !== "none" && !isAutoFollowablePagination(pagination)) {
     warnings.push(`Wykryto paginację typu "${pagination.mode}" (experimental) — spróbuję jeszcze linki z href/numery stron, ale przyciski wymagające JS mogą wymagać trybu Playwright.`);
   }
 
   // 1. Zbieramy URL-e produktów ze stron listingu. Kolejka obsługuje next link oraz paginację
-  // numeryczną (?page=2, /page/2, /strona/2) wykrytą na każdej kolejnej stronie.
+  // numeryczną (?page=2, /page/2, /strona/2) wykrytą na każdej kolejnej stronie. Dla click_next
+  // startujemy z URL-ami zebranymi już przez kliknięcie na żywo (preCollectedProductUrls) —
+  // poniższa pętla i tak jeszcze raz przetworzy bieżącą (już przeklikaną) stronę, ale dedupe
+  // sprawia, że to nieszkodliwe powtórzenie, nie utrata danych.
   const baseKey = normalizeCrawlUrl(baseUrl);
   const pendingPageUrls = [baseKey || baseUrl];
   const visitedPageUrls = new Set();
   let pagesVisited = 0;
-  let productUrls = [];
+  let productUrls = dedupe(preCollectedProductUrls.map(normalizeCrawlUrl).filter((url) => url && isSameOriginUrl(url, baseUrl)));
   let queuedBeyondLimit = false;
 
   while (pendingPageUrls.length > 0 && pagesVisited < effectiveMaxPages && !scanStopRequested) {
@@ -626,6 +725,7 @@ async function scanCatalog({ maxPages, maxProducts, useAI, apiKey, aiModel, aiPr
   }
 
   productUrls = capArray(dedupe(productUrls), productCap);
+  pagesVisited += clickThroughPages; // strony "odklikane" w click_next liczą się jako realnie odwiedzone
   if (queuedBeyondLimit || pendingPageUrls.length > 0) {
     warnings.push(`Skan zatrzymał się na limicie ${effectiveMaxPages} stron. Zwiększ "Max pages", jeśli kategoria ma więcej stron.`);
   }

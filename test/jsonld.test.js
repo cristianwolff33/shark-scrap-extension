@@ -1,6 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseJsonLdBlocks, findProductNodes, mapProductNode, getByPath, detectFromJsonLd } from "../lib/jsonld.js";
+import {
+  parseJsonLdBlocks,
+  findProductNodes,
+  findBreadcrumbListNodes,
+  breadcrumbListToCategoryPath,
+  mapProductNode,
+  getByPath,
+  detectFromJsonLd,
+} from "../lib/jsonld.js";
 
 const PRODUCT = {
   "@context": "https://schema.org",
@@ -28,7 +36,8 @@ test("mapProductNode wyciąga podstawowe pola i ścieżki", () => {
   assert.equal(fields.price.value, "499.00");
   assert.equal(fields.price.path, "offers.price");
   assert.equal(fields.currency.value, "PLN");
-  assert.equal(fields.availability.value, "https://schema.org/InStock");
+  // "https://schema.org/InStock" -> zamieniane na czytelny polski tekst, nie zostaje surowym URL-em w eksporcie.
+  assert.equal(fields.availability.value, "Dostępny");
   assert.equal(fields.images.multiple, true);
   assert.equal(fields.images.value, "https://cdn.example.com/x200-1.jpg"); // pierwsze = podgląd
   assert.deepEqual(fields.images.values, ["https://cdn.example.com/x200-1.jpg", "https://cdn.example.com/x200-2.jpg"]); // pełna lista do pobrania wszystkich zdjęć
@@ -46,8 +55,62 @@ test("ścieżki wygenerowane przez mapProductNode odtwarzają wartość przez ge
   const fields = mapProductNode(PRODUCT);
   for (const [field, spec] of Object.entries(fields)) {
     if (field === "images" || field === "variants") continue; // wielowartościowe — inna ścieżka odczytu
+    if (field === "availability") continue; // wartość jest humanizowana (patrz test niżej), nie 1:1 z surowym schema.org
     assert.equal(getByPath(PRODUCT, spec.path), spec.value, `field ${field}`);
   }
+});
+
+test("mapProductNode humanizuje availability ze schema.org (URL albo skrót) na czytelny tekst", () => {
+  const cases = [
+    ["https://schema.org/InStock", "Dostępny"],
+    ["OutOfStock", "Niedostępny"],
+    ["https://schema.org/PreOrder", "Przedsprzedaż"],
+    ["LimitedAvailability", "Ograniczona dostępność"],
+  ];
+  for (const [raw, expected] of cases) {
+    const fields = mapProductNode({ ...PRODUCT, offers: { ...PRODUCT.offers, availability: raw } });
+    assert.equal(fields.availability.value, expected, `raw=${raw}`);
+  }
+  // Nieznana/nietypowa wartość — zostaje bez zmian (nie ucinamy informacji, której nie rozumiemy).
+  const unknown = mapProductNode({ ...PRODUCT, offers: { ...PRODUCT.offers, availability: "SomeWeirdStatus" } });
+  assert.equal(unknown.availability.value, "SomeWeirdStatus");
+});
+
+test("findBreadcrumbListNodes i breadcrumbListToCategoryPath budują ścieżkę kategorii z okruszków SEO", () => {
+  const breadcrumb = {
+    "@context": "https://schema.org",
+    "@type": "BreadcrumbList",
+    itemListElement: [
+      { "@type": "ListItem", position: 2, name: "Krzesła biurowe" },
+      { "@type": "ListItem", position: 1, name: "Meble" },
+      { "@type": "ListItem", position: 3, item: { name: "X200" } },
+    ],
+  };
+  const nodes = parseJsonLdBlocks([JSON.stringify(breadcrumb)]);
+  const found = findBreadcrumbListNodes(nodes);
+  assert.equal(found.length, 1);
+  assert.equal(breadcrumbListToCategoryPath(found[0]), "Meble > Krzesła biurowe > X200");
+});
+
+test("detectFromJsonLd spada na BreadcrumbList, gdy węzeł Product nie ma własnej category", () => {
+  const productWithoutCategory = { ...PRODUCT };
+  delete productWithoutCategory.category;
+  const breadcrumb = {
+    "@type": "BreadcrumbList",
+    itemListElement: [
+      { position: 1, name: "Meble" },
+      { position: 2, name: "Krzesła biurowe" },
+    ],
+  };
+  const result = detectFromJsonLd([JSON.stringify(productWithoutCategory), JSON.stringify(breadcrumb)]);
+  assert.equal(result.fields.category.value, "Meble > Krzesła biurowe");
+  assert.equal(result.fields.category.source, "jsonld");
+});
+
+test("detectFromJsonLd NIE nadpisuje category z Product breadcrumbem, jeśli Product już ją ma", () => {
+  const breadcrumb = { "@type": "BreadcrumbList", itemListElement: [{ position: 1, name: "Coś innego" }] };
+  const result = detectFromJsonLd([JSON.stringify(PRODUCT), JSON.stringify(breadcrumb)]);
+  assert.equal(result.fields.category.value, "Meble > Krzesła biurowe"); // z samego Product, nie z breadcrumb
 });
 
 test("obsługuje @graph i pomija niepoprawny JSON bez wyjątku", () => {

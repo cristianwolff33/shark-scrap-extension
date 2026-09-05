@@ -1,8 +1,9 @@
 import { PRODUCT_FIELDS, createDefaultConfig, slugifyDomain } from "../lib/schema.js";
 import { createBridgeClient } from "../lib/bridge-client.js";
-import { loadBridgeSettings, loadConfig, saveBridgeSettings, saveConfig, loadOpenAiSettings, saveOpenAiSettings } from "../lib/storage.js";
+import { loadBridgeSettings, loadConfig, saveBridgeSettings, saveConfig, loadAiSettings, saveAiSettings } from "../lib/storage.js";
 import { productsToAdapterRows, rowsToCsv, rowsToJsonBlob, rowsToXlsxBlob, imagesToZipBlob, slugifyBrand, normalizeImageTemplate } from "../lib/export.js";
-import { generateAdapterRows } from "../lib/openai-client.js";
+import { generateAdapterRows as generateAdapterRowsCodex, DEFAULT_MODEL as CODEX_DEFAULT_MODEL } from "../lib/openai-client.js";
+import { generateAdapterRows as generateAdapterRowsClaude, DEFAULT_MODEL as CLAUDE_DEFAULT_MODEL } from "../lib/anthropic-client.js";
 import { formatScanProgress } from "../lib/crawler.js";
 import * as fsdir from "../lib/fsdir.js";
 
@@ -38,7 +39,7 @@ const JOB_STATUS_LABELS = {
   timeout: "Timeout",
 };
 
-/** @type {{tabId:number, domain:string, url:string, config: import('../lib/schema.js').ScraperConfig, projectId: string|null, scanning: boolean, scanProducts: any[], adapterRows: any[]|null, outputDirHandle: any, openai: {apiKey:string, model:string}, bridge: {mode:string, baseUrl:string, localBaseUrl:string, cloudBaseUrl:string, cloudUserId:string, connected:boolean, jobId:string|null}}} */
+/** @type {{tabId:number, domain:string, url:string, config: import('../lib/schema.js').ScraperConfig, projectId: string|null, scanning: boolean, scanProducts: any[], adapterRows: any[]|null, outputDirHandle: any, ai: {provider:string, openaiApiKey:string, openaiModel:string, anthropicApiKey:string, anthropicModel:string}, bridge: {mode:string, baseUrl:string, localBaseUrl:string, cloudBaseUrl:string, cloudUserId:string, connected:boolean, jobId:string|null}}} */
 const state = {
   tabId: null,
   domain: "",
@@ -49,7 +50,7 @@ const state = {
   scanProducts: [],
   adapterRows: null,
   outputDirHandle: null,
-  openai: { apiKey: "", model: "" },
+  ai: { provider: "openai", openaiApiKey: "", openaiModel: "", anthropicApiKey: "", anthropicModel: "" },
   bridge: {
     mode: "local",
     baseUrl: "http://127.0.0.1:8765",
@@ -90,12 +91,34 @@ function frameworkLabel() {
   return isCloudMode() ? "Cloud" : "Framework";
 }
 
+/** "openai" (Codex) albo "anthropic" (Claude) — dwa niezależne connectory AI, każdy z własnym
+ * kluczem/modelem w state.ai, żeby przełączanie providera nie kasowało drugiego klucza. */
+function currentAiProvider() {
+  return state.ai.provider === "anthropic" ? "anthropic" : "openai";
+}
+
+function aiProviderLabel(provider = currentAiProvider()) {
+  return provider === "anthropic" ? "Claude" : "Codex";
+}
+
+function currentAiApiKey() {
+  return currentAiProvider() === "anthropic" ? state.ai.anthropicApiKey : state.ai.openaiApiKey;
+}
+
+function currentAiModel() {
+  return currentAiProvider() === "anthropic" ? state.ai.anthropicModel : state.ai.openaiModel;
+}
+
+function defaultAiModel(provider = currentAiProvider()) {
+  return provider === "anthropic" ? CLAUDE_DEFAULT_MODEL : CODEX_DEFAULT_MODEL;
+}
+
 function isAiAvailable() {
-  return isCloudMode() || !!state.openai.apiKey;
+  return isCloudMode() || !!currentAiApiKey();
 }
 
 function currentAiLabel() {
-  return isCloudMode() ? "backend wybiera model" : state.openai.model || "gpt-5.6-sol";
+  return isCloudMode() ? "backend wybiera model" : currentAiModel() || defaultAiModel();
 }
 
 function currentFrameworkBaseUrl() {
@@ -137,16 +160,17 @@ function mergeAiRowsWithImages(fallbackRows, aiRows) {
 async function generateAiRowsInBatches(products, batchSize = 8) {
   const rows = [];
   const cloudClient = isCloudMode() ? bridgeClient() : null;
+  const generateAdapterRows = currentAiProvider() === "anthropic" ? generateAdapterRowsClaude : generateAdapterRowsCodex;
   let model = "";
   for (let offset = 0; offset < products.length; offset += batchSize) {
     const batch = products.slice(offset, offset + batchSize);
     el("scan-progress-wrap").hidden = false;
     el("scan-progress-text").textContent = `AI generuje dane: ${Math.min(offset + batch.length, products.length)}/${products.length} produktów`;
     const res = cloudClient
-      ? await cloudClient.normalizeProducts({ products: batch, model: state.openai.model || "" })
+      ? await cloudClient.normalizeProducts({ products: batch, model: currentAiModel() || "" })
       : await generateAdapterRows({
-          apiKey: state.openai.apiKey,
-          model: state.openai.model,
+          apiKey: currentAiApiKey(),
+          model: currentAiModel(),
           products: batch,
         });
     model = res.model || model;
@@ -433,7 +457,7 @@ function renderWarnings(warnings) {
 
 async function onScanCatalog() {
   await saveBridgeSettingsFromForm({ resetJob: false });
-  await onApiKeyInputChange();
+  await persistCurrentAiFields();
   readFormIntoConfig();
   state.scanning = true;
   state.scanProducts = [];
@@ -463,9 +487,9 @@ async function onScanCatalog() {
         maxPages,
         maxProducts,
         useAI,
-        apiKey: isCloudMode() ? "" : state.openai.apiKey,
-        aiModel: state.openai.model,
-        aiProvider: isCloudMode() ? "cloud" : "openai",
+        apiKey: isCloudMode() ? "" : currentAiApiKey(),
+        aiModel: isCloudMode() ? "" : currentAiModel(),
+        aiProvider: isCloudMode() ? "cloud" : currentAiProvider(),
         cloudAi,
       },
     });
@@ -589,7 +613,7 @@ async function writeOutput(filename, blob) {
 
 async function ensureScanResults() {
   await saveBridgeSettingsFromForm({ resetJob: false });
-  await onApiKeyInputChange();
+  await persistCurrentAiFields();
   if (state.scanProducts.length > 0) return true;
   if (state.scanning) return false;
   toast("Skanuję stronę automatycznie...");
@@ -1108,45 +1132,66 @@ async function onFrameworkExport() {
   }
 }
 
-/** Odświeża hero-checkbox "Użyj AI" + etykietę wg trybu: local token albo backend cloud. */
+/** Odświeża hero-checkbox "Użyj AI", etykietę providera i pola klucz/model wg wybranego providera. */
 function refreshAiStatusUi() {
   const label = el("ai-status-label");
   const checkbox = el("use-ai-checkbox");
+  const provider = currentAiProvider();
+
+  el("ai-provider-openai").checked = provider === "openai";
+  el("ai-provider-anthropic").checked = provider === "anthropic";
+  el("ai-key-label").textContent = `Token ${aiProviderLabel(provider)} (${provider === "anthropic" ? "Anthropic" : "OpenAI"})`;
+  el("ai-api-key-input").placeholder = provider === "anthropic" ? "Wklej klucz Anthropic (sk-ant-...)" : "Wklej token OpenAI (sk-...)";
+  el("ai-model-input").placeholder = `domyślnie: ${defaultAiModel(provider)}`;
+
   if (isCloudMode()) {
     label.textContent = "AI przez Cloud - model wybiera backend";
     checkbox.disabled = false;
     checkbox.checked = true;
     return;
   }
-  if (state.openai.apiKey) {
-    label.textContent = `AI połączone, model: ${state.openai.model || "gpt-5.6-sol"}`;
+  if (currentAiApiKey()) {
+    label.textContent = `${aiProviderLabel(provider)} połączony, model: ${currentAiLabel()}`;
     checkbox.disabled = false;
     checkbox.checked = true;
   } else {
-    label.textContent = "AI niepołączone";
+    label.textContent = `${aiProviderLabel(provider)} niepołączony`;
     checkbox.disabled = true;
     checkbox.checked = false;
   }
 }
 
-/** Wczytuje zapisany klucz OpenAI z chrome.storage.local do state + formularza ustawień. */
+/** Wczytuje zapisane ustawienia AI (provider + oba klucze) z chrome.storage.local do formularza. */
 async function loadAiSettingsIntoUi() {
-  state.openai = await loadOpenAiSettings();
-  if (state.openai.model === "gpt-5.6-luna") {
-    state.openai.model = "";
-    await saveOpenAiSettings(state.openai);
-  }
-  el("openai-api-key-input").value = state.openai.apiKey || "";
-  el("openai-model-input").value = state.openai.model || "";
+  state.ai = await loadAiSettings();
+  el("ai-api-key-input").value = currentAiApiKey() || "";
+  el("ai-model-input").value = currentAiModel() || "";
   refreshAiStatusUi();
 }
 
-async function onApiKeyInputChange() {
-  const apiKey = el("openai-api-key-input").value.trim();
-  const model = el("openai-model-input").value.trim();
-  state.openai = { apiKey, model };
+/** Przełącza aktywny provider (Codex/Claude) — nie kasuje klucza drugiego providera. */
+async function onAiProviderChange(event) {
+  state.ai.provider = event.target.value === "anthropic" ? "anthropic" : "openai";
+  el("ai-api-key-input").value = currentAiApiKey() || "";
+  el("ai-model-input").value = currentAiModel() || "";
   state.adapterRows = null;
-  await saveOpenAiSettings(state.openai);
+  await saveAiSettings(state.ai);
+  refreshAiStatusUi();
+}
+
+/** Zapisuje klucz/model DO SLOTU aktualnie wybranego providera. */
+async function persistCurrentAiFields() {
+  const apiKey = el("ai-api-key-input").value.trim();
+  const model = el("ai-model-input").value.trim();
+  if (currentAiProvider() === "anthropic") {
+    state.ai.anthropicApiKey = apiKey;
+    state.ai.anthropicModel = model;
+  } else {
+    state.ai.openaiApiKey = apiKey;
+    state.ai.openaiModel = model;
+  }
+  state.adapterRows = null;
+  await saveAiSettings(state.ai);
   refreshAiStatusUi();
 }
 
@@ -1157,26 +1202,29 @@ async function onImageDomainChange() {
 }
 
 async function onSaveAiSettings() {
-  const apiKey = el("openai-api-key-input").value.trim();
-  const model = el("openai-model-input").value.trim();
+  const apiKey = el("ai-api-key-input").value.trim();
   if (!apiKey) {
     toast("Podaj token połączenia AI", "err");
     return;
   }
-  state.openai = { apiKey, model };
-  await saveOpenAiSettings(state.openai);
-  refreshAiStatusUi();
-  toast("Codex connector połączony");
+  await persistCurrentAiFields();
+  toast(`${aiProviderLabel()} connector połączony`);
 }
 
 async function onClearAiSettings() {
-  state.openai = { apiKey: "", model: "" };
+  if (currentAiProvider() === "anthropic") {
+    state.ai.anthropicApiKey = "";
+    state.ai.anthropicModel = "";
+  } else {
+    state.ai.openaiApiKey = "";
+    state.ai.openaiModel = "";
+  }
   state.adapterRows = null;
-  await saveOpenAiSettings(state.openai);
-  el("openai-api-key-input").value = "";
-  el("openai-model-input").value = "";
+  await saveAiSettings(state.ai);
+  el("ai-api-key-input").value = "";
+  el("ai-model-input").value = "";
   refreshAiStatusUi();
-  toast("Codex connector rozłączony");
+  toast(`${aiProviderLabel()} connector rozłączony`);
 }
 
 // --- init ---------------------------------------------------------------------------
@@ -1207,9 +1255,12 @@ async function init() {
   syncFrameworkModeUi();
 
   await loadAiSettingsIntoUi();
+  el("ai-provider-openai").addEventListener("change", onAiProviderChange);
+  el("ai-provider-anthropic").addEventListener("change", onAiProviderChange);
   el("save-ai-settings-btn").addEventListener("click", onSaveAiSettings);
   el("clear-ai-settings-btn").addEventListener("click", onClearAiSettings);
-  el("openai-api-key-input").addEventListener("change", onApiKeyInputChange);
+  el("ai-api-key-input").addEventListener("change", persistCurrentAiFields);
+  el("ai-model-input").addEventListener("change", persistCurrentAiFields);
   el("image-base-url-input").addEventListener("change", onImageDomainChange);
   el("bridge-base-url-input").addEventListener("change", saveBridgeSettingsFromForm);
   el("cloud-base-url-input").addEventListener("change", saveBridgeSettingsFromForm);

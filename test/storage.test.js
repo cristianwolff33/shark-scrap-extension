@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { loadBridgeSettings, saveBridgeSettings } from "../lib/storage.js";
+import { loadBridgeSettings, saveBridgeSettings, loadAiSettings, saveAiSettings } from "../lib/storage.js";
 
 function installChromeStorage(initial = {}) {
   const data = { ...initial };
@@ -61,4 +61,51 @@ test("saveBridgeSettings zapisuje osobny cloud runtime", async () => {
   assert.equal(data["bridge:settings"].localBaseUrl, "http://127.0.0.1:8765");
   assert.equal(data["bridge:settings"].cloudBaseUrl, "http://localhost:8766");
   assert.equal(data["bridge:settings"].cloudUserId, "alice");
+});
+
+test("loadAiSettings zwraca domyślny stan (provider openai, wszystko puste) gdy nic nie zapisano", async () => {
+  installChromeStorage();
+
+  const settings = await loadAiSettings();
+
+  assert.equal(settings.provider, "openai");
+  assert.equal(settings.openaiApiKey, "");
+  assert.equal(settings.openaiModel, "");
+  assert.equal(settings.anthropicApiKey, "");
+  assert.equal(settings.anthropicModel, "");
+});
+
+test("loadAiSettings migruje stary klucz openai:settings (sprzed multi-providera) na openaiApiKey/openaiModel", async () => {
+  installChromeStorage({ "openai:settings": { apiKey: "sk-legacy", model: "gpt-5.6-sol" } });
+
+  const settings = await loadAiSettings();
+
+  assert.equal(settings.provider, "openai");
+  assert.equal(settings.openaiApiKey, "sk-legacy");
+  assert.equal(settings.openaiModel, "gpt-5.6-sol");
+});
+
+test("saveAiSettings/loadAiSettings zachowują OBA klucze niezależnie przy przełączaniu providera", async () => {
+  installChromeStorage();
+
+  await saveAiSettings({ provider: "openai", openaiApiKey: "sk-openai", openaiModel: "", anthropicApiKey: "", anthropicModel: "" });
+  await saveAiSettings({ provider: "anthropic", openaiApiKey: "sk-openai", openaiModel: "", anthropicApiKey: "sk-ant", anthropicModel: "claude-sonnet-5" });
+
+  const settings = await loadAiSettings();
+  assert.equal(settings.provider, "anthropic");
+  assert.equal(settings.openaiApiKey, "sk-openai"); // klucz OpenAI przetrwał przełączenie na Claude
+  assert.equal(settings.anthropicApiKey, "sk-ant");
+  assert.equal(settings.anthropicModel, "claude-sonnet-5");
+});
+
+test("loadAiSettings ignoruje legacy klucz, jeśli nowy ai:settings już istnieje", async () => {
+  installChromeStorage({
+    "openai:settings": { apiKey: "sk-legacy", model: "old" },
+    "ai:settings": { provider: "anthropic", openaiApiKey: "", openaiModel: "", anthropicApiKey: "sk-ant", anthropicModel: "" },
+  });
+
+  const settings = await loadAiSettings();
+  assert.equal(settings.provider, "anthropic");
+  assert.equal(settings.anthropicApiKey, "sk-ant");
+  assert.equal(settings.openaiApiKey, "");
 });

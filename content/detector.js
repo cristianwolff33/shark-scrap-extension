@@ -576,7 +576,11 @@ async function suggestMissingFieldsWithAi({ apiKey, aiModel, aiProvider, cloudAi
     });
     return client.suggestFields({ html, url: bestSamplePair.url, fields: missing, model: aiModel });
   }
-  const { suggestFields } = await loadLib("openai-client.js");
+  // "openai" (Codex) albo "anthropic" (Claude) — oba klienty mają identyczne publiczne API
+  // (suggestFields), różni się tylko moduł, więc reszta orkiestracji (poniżej, weryfikacja
+  // selektora na żywym DOM próbki) jest wspólna dla obu providerów.
+  const clientModule = aiProvider === "anthropic" ? "anthropic-client.js" : "openai-client.js";
+  const { suggestFields } = await loadLib(clientModule);
   return suggestFields({ apiKey, model: aiModel, html, url: bestSamplePair.url, fields: missing });
 }
 

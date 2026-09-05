@@ -48,13 +48,29 @@
 
       <details class="settings-drawer">
         <summary>
-          <span>Codex connector</span>
+          <span>AI connector</span>
           <small id="ai-status-label">Brak klucza API - AI jest wyłączone</small>
         </summary>
+        <div class="settings-field">
+          <div class="runtime-switch" role="radiogroup" aria-label="Provider AI">
+            <label>
+              <input id="ai-provider-openai" type="radio" name="ai-provider" value="openai" checked />
+              <span>Codex</span>
+            </label>
+            <label>
+              <input id="ai-provider-anthropic" type="radio" name="ai-provider" value="anthropic" />
+              <span>Claude</span>
+            </label>
+          </div>
+        </div>
         <label class="domain-form settings-field">
-          <span>Local/dev token AI</span>
-          <input id="openai-api-key-input" type="password" placeholder="Wklej token połączenia" autocomplete="off" />
+          <span id="ai-key-label">Token Codex (OpenAI)</span>
+          <input id="ai-api-key-input" type="password" placeholder="Wklej token połączenia" autocomplete="off" />
           <small>Używany tylko w Local mode. W Cloud mode model i sekrety wybiera backend.</small>
+        </label>
+        <label class="domain-form settings-field">
+          <span>Model (opcjonalnie)</span>
+          <input id="ai-model-input" type="text" placeholder="domyślny model providera" autocomplete="off" />
         </label>
         <div class="settings-actions">
           <button id="save-ai-settings-btn" type="button" class="settings-btn">Connect</button>
@@ -181,7 +197,6 @@
       <button id="detect-listing-btn" type="button"></button>
       <div id="listing-summary"></div>
 
-      <input id="openai-model-input" type="hidden" />
       <pre id="log-output"></pre>
     </section>
   </main>

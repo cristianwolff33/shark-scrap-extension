@@ -12,6 +12,7 @@
   --xlsx: #35f2d0;
   --json: #b86bff;
   --images: #ffcf33;
+  --full: #ff9f43;
   --danger: #ff3d6e;
   --ok: #7dff9d;
   --warn: #ffd166;
@@ -380,13 +381,28 @@ h1 {
   --action-glow: rgba(255, 207, 51, 0.24);
 }
 
-.framework-box {
-  position: relative;
+/* "Download Full" — jeden klik zamiast czterech (CSV+XLSX+JSON+zdjęcia), stąd wyraźnie inny,
+ * "ciepły" akcent odróżniający go od pojedynczych eksportów powyżej. */
+.action-btn.full {
+  --action-color: var(--full);
+  --action-glow: rgba(255, 159, 67, 0.28);
+  border-style: dashed;
+}
+
+/* Sekcja "Pełny eksport" jest teraz zwiniętym, opcjonalnym panelem (jak Codex connector) —
+ * to funkcja wymagająca osobnego backendu (bridge/cloud), którego większość userów nie
+ * uruchamia. Nie powinna konkurować wizualnie z realnie działającymi bez backendu przyciskami
+ * (Skanuj sklep, Generate CSV/XLSX/JSON, Download Images) w action-grid powyżej. */
+.framework-drawer {
   margin-top: 12px;
-  border: 1px solid rgba(53, 242, 208, 0.28);
-  border-radius: 8px;
-  background: rgba(13, 4, 18, 0.58);
-  padding: 12px;
+}
+
+.framework-drawer[open] {
+  border-color: rgba(53, 242, 208, 0.36);
+}
+
+.framework-body {
+  padding: 0 12px 12px;
 }
 
 .framework-head {
@@ -397,17 +413,9 @@ h1 {
   margin-bottom: 10px;
 }
 
-.framework-head span {
-  display: block;
-  color: var(--muted);
-  font-size: 10px;
-  font-weight: 900;
-  text-transform: uppercase;
-}
-
 .framework-head strong {
   color: var(--xlsx);
-  font-size: 18px;
+  font-size: 14px;
   font-weight: 950;
   line-height: 1;
 }

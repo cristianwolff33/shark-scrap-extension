@@ -24,7 +24,7 @@
       <label class="domain-form">
         <span>Twoja domena do linków zdjęć</span>
         <input id="image-base-url-input" type="text" placeholder="mojadomena.pl" autocomplete="off" />
-        <small>Wynik: https://twojadomena.pl/produkty/[sku].[rozszerzenie]</small>
+        <small>Wynik: https://twojadomena.pl/produkty/[marka]/[sku].[rozszerzenie]</small>
       </label>
 
       <div class="scan-options" aria-label="Zakres skanu">
@@ -79,45 +79,52 @@
           <span>Download</span>
           <strong>Images</strong>
         </button>
+        <button id="export-full-btn" class="action-btn full">
+          <span>Download wszystko naraz</span>
+          <strong>Full</strong>
+        </button>
       </div>
 
-      <section class="framework-box">
-        <div class="framework-head">
-          <div>
-            <span>Pełny eksport</span>
+      <details class="settings-drawer framework-drawer">
+        <summary>
+          <span>Pełny eksport (zaawansowane)</span>
+          <small>Osobny backend — opcjonalne, niewymagane do eksportu wyżej</small>
+        </summary>
+        <div class="framework-body">
+          <div class="framework-head">
             <strong id="framework-mode-title">Framework</strong>
+            <button id="check-bridge-btn" type="button" class="settings-btn ghost">Sprawdź</button>
           </div>
-          <button id="check-bridge-btn" type="button" class="settings-btn ghost">Sprawdź</button>
-        </div>
-        <div class="runtime-switch" role="radiogroup" aria-label="Tryb API">
-          <label>
-            <input id="framework-mode-local" type="radio" name="framework-mode" value="local" checked />
-            <span>Local</span>
+          <div class="runtime-switch" role="radiogroup" aria-label="Tryb API">
+            <label>
+              <input id="framework-mode-local" type="radio" name="framework-mode" value="local" checked />
+              <span>Local</span>
+            </label>
+            <label>
+              <input id="framework-mode-cloud" type="radio" name="framework-mode" value="cloud" />
+              <span>Cloud</span>
+            </label>
+          </div>
+          <label id="local-api-field" class="domain-form framework-url-field runtime-field">
+            <span>Local API</span>
+            <input id="bridge-base-url-input" type="text" placeholder="http://127.0.0.1:8765" autocomplete="off" />
           </label>
-          <label>
-            <input id="framework-mode-cloud" type="radio" name="framework-mode" value="cloud" />
-            <span>Cloud</span>
+          <label id="cloud-api-field" class="domain-form framework-url-field runtime-field" hidden>
+            <span>Cloud API</span>
+            <input id="cloud-base-url-input" type="text" placeholder="http://127.0.0.1:8766" autocomplete="off" />
           </label>
+          <label id="cloud-user-field" class="domain-form framework-url-field runtime-field" hidden>
+            <span>Dev user</span>
+            <input id="cloud-user-id-input" type="text" placeholder="dev-user" autocomplete="off" />
+          </label>
+          <button id="framework-export-btn" type="button" class="framework-btn">
+            <span>Uruchom pełny eksport</span>
+            <strong id="bridge-status-label">nie sprawdzono</strong>
+          </button>
+          <div id="framework-job-progress" class="subtle">Framework: nie sprawdzono połączenia</div>
+          <div id="framework-outputs" class="framework-outputs" hidden></div>
         </div>
-        <label id="local-api-field" class="domain-form framework-url-field runtime-field">
-          <span>Local API</span>
-          <input id="bridge-base-url-input" type="text" placeholder="http://127.0.0.1:8765" autocomplete="off" />
-        </label>
-        <label id="cloud-api-field" class="domain-form framework-url-field runtime-field" hidden>
-          <span>Cloud API</span>
-          <input id="cloud-base-url-input" type="text" placeholder="http://127.0.0.1:8766" autocomplete="off" />
-        </label>
-        <label id="cloud-user-field" class="domain-form framework-url-field runtime-field" hidden>
-          <span>Dev user</span>
-          <input id="cloud-user-id-input" type="text" placeholder="dev-user" autocomplete="off" />
-        </label>
-        <button id="framework-export-btn" type="button" class="framework-btn">
-          <span>Uruchom pełny eksport</span>
-          <strong id="bridge-status-label">nie sprawdzono</strong>
-        </button>
-        <div id="framework-job-progress" class="subtle">Framework: nie sprawdzono połączenia</div>
-        <div id="framework-outputs" class="framework-outputs" hidden></div>
-      </section>
+      </details>
 
       <div id="scan-progress-wrap" class="progress-wrap" hidden>
         <div class="progress-bar"><div id="scan-progress-fill" class="progress-fill"></div></div>

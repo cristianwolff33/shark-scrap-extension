@@ -11,6 +11,7 @@ import {
   rowsToCsv,
   rowsToXlsxBlob,
   imagesToZipBlob,
+  slugifyBrand,
 } from "../lib/export.js";
 
 /** Szuka ciągu bajtów `needle` gdziekolwiek w `haystack` — wystarczy do sprawdzenia, że metoda
@@ -155,12 +156,19 @@ test("imagesToZipBlob na pustej liście nadal zwraca poprawny (pusty) plik ZIP",
   assert.equal(bytes[3], 0x06);
 });
 
-test("normalizeImageTemplate buduje wzór z domeny zgodny z adapter request", () => {
-  assert.equal(normalizeImageTemplate("mojadomena.pl"), "https://mojadomena.pl/produkty/[sku].[rozszerzenie]");
+test("normalizeImageTemplate buduje wzór z domeny z segmentem [marka] zgodny z adapter request", () => {
+  assert.equal(normalizeImageTemplate("mojadomena.pl"), "https://mojadomena.pl/produkty/[marka]/[sku].[rozszerzenie]");
   assert.equal(normalizeImageTemplate("https://x.pl/img/[sku].[rozszerzenie]"), "https://x.pl/img/[sku].[rozszerzenie]");
 });
 
-test("productsToAdapterRows tworzy finalną strukturę kolumn i linki zdjN", () => {
+test("slugifyBrand normalizuje nazwę marki do bezpiecznego segmentu ścieżki/URL-a", () => {
+  assert.equal(slugifyBrand("Acme"), "acme");
+  assert.equal(slugifyBrand("Łoś & Syn Sp. z o.o."), "los-syn-sp-z-o-o");
+  assert.equal(slugifyBrand(""), "bez-marki");
+  assert.equal(slugifyBrand(undefined), "bez-marki");
+});
+
+test("productsToAdapterRows tworzy finalną strukturę kolumn (w tym GPSR) i linki zdjN z segmentem marki", () => {
   const rows = productsToAdapterRows(SAMPLE_PRODUCTS, "mojadomena.pl");
   assert.equal(rows[0].Cena, "199.99");
   assert.equal(rows[0].SKU, "X200-BLK");
@@ -169,8 +177,12 @@ test("productsToAdapterRows tworzy finalną strukturę kolumn i linki zdjN", () 
   assert.equal(rows[0]["TYTUŁ OFERTY"], "Krzesło biurowe");
   assert.match(rows[0].opis_dodatkowy4, /Parametry produktu/);
   assert.ok(!rows[0].OPIS.includes("<img"));
-  assert.equal(rows[0].zdj1, "https://mojadomena.pl/produkty/X200-BLK.jpg");
-  assert.equal(rows[0].zdj2, "https://mojadomena.pl/produkty/X200-BLK.png");
+  // Segment [marka] w linku MUSI być tym samym slugiem, co folder tworzony przy pobieraniu
+  // zdjęć (onExportImages w sidepanel/main.js) — inaczej link w CSV nie wskazywałby na
+  // rzeczywiste miejsce pliku po wgraniu na domenę usera.
+  assert.equal(rows[0].zdj1, "https://mojadomena.pl/produkty/acme/X200-BLK.jpg");
+  assert.equal(rows[0].zdj2, "https://mojadomena.pl/produkty/acme/X200-BLK.png");
+  assert.equal(rows[0].GPSR, "");
 });
 
 test("headersForRows dokłada dynamiczne kolumny zdjęć na końcu", () => {
@@ -182,11 +194,12 @@ test("rowsToCsv i rowsToXlsxBlob eksportują finalne wiersze adaptera", async ()
   const rows = productsToAdapterRows(SAMPLE_PRODUCTS, "mojadomena.pl");
   const csv = rowsToCsv(rows);
   assert.match(csv.split("\r\n")[0], /^Cena,SKU,EAN,OPIS/);
+  assert.match(csv.split("\r\n")[0], /GPSR/);
   assert.match(csv, /zdj1,zdj2/);
-  assert.match(csv, /https:\/\/mojadomena\.pl\/produkty\/X200-BLK\.jpg/);
+  assert.match(csv, /https:\/\/mojadomena\.pl\/produkty\/acme\/X200-BLK\.jpg/);
 
   const blob = rowsToXlsxBlob(rows);
   const text = new TextDecoder().decode(new Uint8Array(await blob.arrayBuffer()));
   assert.match(text, /TYTUŁ OFERTY/);
-  assert.match(text, /https:\/\/mojadomena\.pl\/produkty\/X200-BLK\.png/);
+  assert.match(text, /https:\/\/mojadomena\.pl\/produkty\/acme\/X200-BLK\.png/);
 });

@@ -1,7 +1,7 @@
 import { PRODUCT_FIELDS, createDefaultConfig, slugifyDomain } from "../lib/schema.js";
 import { createBridgeClient } from "../lib/bridge-client.js";
 import { loadBridgeSettings, loadConfig, saveBridgeSettings, saveConfig, loadOpenAiSettings, saveOpenAiSettings } from "../lib/storage.js";
-import { productsToAdapterRows, rowsToCsv, rowsToJsonBlob, rowsToXlsxBlob, imagesToZipBlob } from "../lib/export.js";
+import { productsToAdapterRows, rowsToCsv, rowsToJsonBlob, rowsToXlsxBlob, imagesToZipBlob, slugifyBrand, normalizeImageTemplate } from "../lib/export.js";
 import { generateAdapterRows } from "../lib/openai-client.js";
 import { formatScanProgress } from "../lib/crawler.js";
 import * as fsdir from "../lib/fsdir.js";
@@ -20,6 +20,7 @@ const FIELD_LABELS = {
   images: "Zdjęcia",
   product_url: "URL produktu",
   variants: "Warianty",
+  gpsr: "GPSR",
 };
 
 const el = (id) => document.getElementById(id);
@@ -75,17 +76,8 @@ function toast(message, kind = "ok") {
   toast._t = setTimeout(() => { box.hidden = true; }, 3500);
 }
 
-function normalizeImageDomainTemplate(value) {
-  const raw = String(value || "").trim();
-  if (!raw) return "";
-  if (raw.includes("[sku]") || raw.includes("[rozszerzenie]")) return raw;
-  const withProtocol = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
-  const clean = withProtocol.replace(/\/+$/, "");
-  return `${clean}/produkty/[sku].[rozszerzenie]`;
-}
-
 function setExportButtonsDisabled(disabled) {
-  for (const id of ["export-excel-btn", "export-csv-btn", "export-json-preview-btn", "export-images-btn"]) {
+  for (const id of ["export-excel-btn", "export-csv-btn", "export-json-preview-btn", "export-images-btn", "export-full-btn"]) {
     el(id).disabled = disabled;
   }
 }
@@ -276,7 +268,7 @@ function readFormIntoConfig() {
     experimental: pMode === "load_more" || pMode === "infinite_scroll",
   };
 
-  c.image_links.public_base_url = normalizeImageDomainTemplate(el("image-base-url-input").value);
+  c.image_links.public_base_url = normalizeImageTemplate(el("image-base-url-input").value);
   c.image_links.brand_segment = "";
   c.notes = el("notes-textarea").value;
   return c;
@@ -544,7 +536,7 @@ function updateFolderLabel() {
     ? `Folder wyjściowy: ${state.outputDirHandle.name}`
     : fsdir.isSupported()
       ? "Folder wyjściowy: nie wybrano (wybierzesz przy pierwszym pobraniu)"
-      : "Folder wyjściowy: ta przeglądarka nie wspiera wyboru — pliki polecą do Pobrane/scraper-client/…";
+      : "Folder wyjściowy: przeglądarka nie pozwala wybrać folderu z poziomu rozszerzenia — pliki lądują w Pobrane/<nazwa-strony>/. Żeby trafiały na Pulpit, zmień domyślny folder pobierania Chrome (chrome://settings/downloads) na Pulpit.";
 }
 
 /** Zwraca uchwyt do folderu wyjściowego — pyta usera TYLKO raz na sesję (potem z pamięci/IndexedDB). */
@@ -558,7 +550,7 @@ async function ensureOutputDir() {
 
 async function onChangeFolder() {
   if (!fsdir.isSupported()) {
-    toast("Ta przeglądarka nie wspiera wyboru folderu — pliki lądują w Pobrane/scraper-client/…", "err");
+    toast("Przeglądarka nie pozwala wybrać folderu tutaj — pliki lądują w Pobrane/<nazwa-strony>/. Zmień domyślny folder pobierania Chrome na Pulpit, żeby trafiały tam.", "err");
     return;
   }
   try {
@@ -570,8 +562,15 @@ async function onChangeFolder() {
   }
 }
 
-/** Zapisuje Blob jako plik <folder wyjściowy>/<domena>/<filename> — albo, gdy File System Access
- * jest niedostępny, przez chrome.downloads do Pobrane/scraper-client/<domena>/<filename>. */
+/**
+ * Zapisuje Blob jako plik <folder wyjściowy>/<nazwa-strony>/<filename> — albo, gdy File System
+ * Access jest niedostępny (typowe dla side panelu rozszerzenia — Chrome nie pozwala tam wywołać
+ * showDirectoryPicker), przez chrome.downloads do Pobrane/<nazwa-strony>/<filename>. Celowo BEZ
+ * dodatkowego folderu-wrappera (dawniej "scraper-client/") — dzięki temu, jeśli user ustawi w
+ * Chrome domyślny folder pobierania na Pulpit (chrome://settings/downloads), foldery per-strona
+ * lądują BEZPOŚREDNIO na Pulpicie, niezależnie czy klika CSV, XLSX, JSON czy Full — wszystkie
+ * używają tego samego `domainSlug`, więc trafiają do tego samego folderu.
+ */
 async function writeOutput(filename, blob) {
   const domainSlug = slugifyDomain(state.config.domain);
   if (fsdir.isSupported()) {
@@ -582,7 +581,7 @@ async function writeOutput(filename, blob) {
   }
   const url = URL.createObjectURL(blob);
   try {
-    await chrome.downloads.download({ url, filename: `scraper-client/${domainSlug}/${filename}`, saveAs: false });
+    await chrome.downloads.download({ url, filename: `${domainSlug}/${filename}`, saveAs: false });
   } finally {
     setTimeout(() => URL.revokeObjectURL(url), 10_000);
   }
@@ -724,21 +723,32 @@ async function onExportImages() {
     }
 
     // Zbieramy zadania pobrania z limitem bezpieczeństwa (IMAGE_EXPORT_CAP) — katalog może mieć
-    // setki produktów × kilka zdjęć każdy, nie chcemy tego zrobić bez żadnego limitu.
+    // setki produktów × kilka zdjęć każdy, nie chcemy tego zrobić bez żadnego limitu. Marka —
+    // ten sam slug co [marka] w linkach eksportu (patrz lib/export.js, slugifyBrand) — musi się
+    // zgadzać, żeby link w CSV/XLSX wskazywał na realną strukturę folderów po wgraniu na domenę.
     const tasks = [];
     state.scanProducts.forEach((product, idx) => {
       if (tasks.length >= IMAGE_EXPORT_CAP) return;
       const urls = product.fields?.images?.values || (product.fields?.images?.value ? [product.fields.images.value] : []);
       const baseName = slugifyDomain(fieldText(product.fields, "sku") || `produkt-${idx + 1}`);
+      const brandSlug = slugifyBrand(fieldText(product.fields, "brand"));
       urls.forEach((url, i) => {
         if (tasks.length >= IMAGE_EXPORT_CAP) return;
-        tasks.push({ url, name: i > 0 ? `${baseName}-${i + 1}` : baseName });
+        tasks.push({ url, name: i > 0 ? `${baseName}-${i + 1}` : baseName, brandSlug });
       });
     });
 
     let done = 0;
     let failed = 0;
     const zipEntries = []; // wypełniane tylko gdy !useFsDir — trzymamy bajty w pamięci do jednego ZIP-a na końcu
+    const brandDirHandles = new Map(); // cache uchwytów podfolderów marek (useFsDir), żeby nie odpytywać FS przy każdym zdjęciu
+
+    async function brandDirHandleFor(brandSlug) {
+      if (brandDirHandles.has(brandSlug)) return brandDirHandles.get(brandSlug);
+      const handle = await fsdir.subdir(imagesDirHandle, brandSlug);
+      brandDirHandles.set(brandSlug, handle);
+      return handle;
+    }
 
     await runWithConcurrency(tasks, IMAGE_FETCH_CONCURRENCY, async (task) => {
       try {
@@ -746,9 +756,10 @@ async function onExportImages() {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const filename = `${task.name}.${extensionFromUrl(task.url, res.headers.get("content-type"))}`;
         if (useFsDir) {
-          await fsdir.writeFile(imagesDirHandle, filename, await res.blob());
+          const brandDir = await brandDirHandleFor(task.brandSlug);
+          await fsdir.writeFile(brandDir, filename, await res.blob());
         } else {
-          zipEntries.push({ name: filename, bytes: new Uint8Array(await res.arrayBuffer()) });
+          zipEntries.push({ name: `${task.brandSlug}/${filename}`, bytes: new Uint8Array(await res.arrayBuffer()) });
         }
         done += 1;
       } catch (err) {
@@ -765,7 +776,10 @@ async function onExportImages() {
       zipFilename = `${domainSlug}-zdjecia.zip`;
       const objUrl = URL.createObjectURL(zipBlob);
       try {
-        await chrome.downloads.download({ url: objUrl, filename: `scraper-client/${domainSlug}/${zipFilename}`, saveAs: false });
+        // Ten sam `${domainSlug}/` co CSV/XLSX/JSON w writeOutput() — wszystko z jednego skanu
+        // ląduje w jednym folderze bez względu na to, którego przycisku (CSV/XLSX/JSON/Full)
+        // user użył.
+        await chrome.downloads.download({ url: objUrl, filename: `${domainSlug}/${zipFilename}`, saveAs: false });
       } finally {
         setTimeout(() => URL.revokeObjectURL(objUrl), 10_000);
       }
@@ -778,6 +792,30 @@ async function onExportImages() {
     toastError(err);
   } finally {
     btn.disabled = false;
+  }
+}
+
+/** "Download Full" — jeden klik zamiast czterech: CSV + XLSX + JSON + zdjęcia (podzielone na
+ * foldery wg marki). Woła wprost te same funkcje co osobne przyciski, więc nic nie duplikuje —
+ * jeśli skan jeszcze nie był zrobiony, każda z nich i tak sama go uruchomi przy pierwszym wywołaniu
+ * (ensureScanResults/ensureAdapterRows), ale robimy to tu raz z góry, żeby nie robić tego 4×. */
+async function onDownloadFull() {
+  const btn = el("export-full-btn");
+  btn.disabled = true;
+  setExportButtonsDisabled(true);
+  try {
+    if (!(await ensureScanResults())) return;
+    await onExportCsv();
+    await onExportExcel();
+    await onExportJsonPreview();
+    await onExportImages();
+    toast("Pełne pobranie zakończone: CSV + XLSX + JSON + zdjęcia");
+    log("Download Full: zakończono CSV, XLSX, JSON i zdjęcia.");
+  } catch (err) {
+    toastError(err);
+  } finally {
+    btn.disabled = false;
+    setExportButtonsDisabled(false);
   }
 }
 
@@ -1189,6 +1227,7 @@ async function init() {
   el("export-csv-btn").addEventListener("click", onExportCsv);
   el("export-json-preview-btn").addEventListener("click", onExportJsonPreview);
   el("export-images-btn").addEventListener("click", onExportImages);
+  el("export-full-btn").addEventListener("click", onDownloadFull);
 
   el("detect-btn").addEventListener("click", onDetectProduct);
   el("fields-list").addEventListener("click", (e) => {

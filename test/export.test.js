@@ -243,6 +243,15 @@ test("guessFullSizeImageUrls: segment ścieżki rozmiaru — dopasowanie niezale
   assert.ok(candidates.some((c) => c === "https://cdn.pl/original/small/produkt.jpg"));
 });
 
+test("guessFullSizeImageUrls rozpoznaje 'base_action' — DRUGI, osobny rozmiar Rozetki użyty w JSON-LD (image), inny niż /medium/ z DOM", () => {
+  // Realny przypadek: pole JSON-LD "image" na rozetka.com.ua daje linki .../base_action/...
+  // (240x296px) — zupełnie inny segment niż /medium/ widoczny w DOM (80x99px). Bez tego wpisu
+  // zdjęcia z JSON-LD (które zwykle wygrywają jako źródło z największą liczbą zdjęć) zostawały
+  // małe, mimo że reguła dla /medium/ już działała.
+  const candidates = guessFullSizeImageUrls("https://content.rozetka.com.ua/goods/images/base_action/594345358.jpg");
+  assert.equal(candidates[0], "https://content.rozetka.com.ua/goods/images/original/594345358.jpg");
+});
+
 test("guessFullSizeImageUrls nie rusza URL-i bez rozpoznanego segmentu rozmiaru w ścieżce", () => {
   assert.deepEqual(guessFullSizeImageUrls("https://sklep.pl/goods/images/594345358.jpg"), []);
 });

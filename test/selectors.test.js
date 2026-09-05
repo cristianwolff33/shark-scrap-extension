@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { FakeElement, buildTree } from "./fakedom.js";
-import { isStableId, isStableClass, pickStableClass, generateSelector, valueForAttr } from "../lib/selectors.js";
+import { isStableId, isStableClass, pickStableClass, pickTestId, generateSelector, valueForAttr } from "../lib/selectors.js";
 
 test("isStableId odrzuca id numeryczne i hashowe", () => {
   assert.equal(isStableId("main-price"), true);
@@ -55,6 +55,17 @@ test("generateSelector spada do nth-of-type gdy brak stabilnej klasy", () => {
   const target = parent.appendChild(new FakeElement("li", { className: "css-b2" }));
   const selector = generateSelector(target);
   assert.equal(selector, "ul.list > li:nth-of-type(2)");
+});
+
+test("pickTestId zwraca pierwszy pasujący atrybut testowy albo null", () => {
+  const withTestId = new FakeElement("li", { attrs: { "data-testid": "product-card" } });
+  assert.deepEqual(pickTestId(withTestId), { attr: "data-testid", value: "product-card" });
+
+  const withDataQa = new FakeElement("li", { attrs: { "data-qa": "product-tile" } });
+  assert.deepEqual(pickTestId(withDataQa), { attr: "data-qa", value: "product-tile" });
+
+  const withoutAny = new FakeElement("li", { className: "css-x1y2" });
+  assert.equal(pickTestId(withoutAny), null);
 });
 
 test("valueForAttr obsługuje text/html/atrybut", () => {

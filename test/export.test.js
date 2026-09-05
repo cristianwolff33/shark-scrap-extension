@@ -10,7 +10,20 @@ import {
   productsToXlsxBlob,
   rowsToCsv,
   rowsToXlsxBlob,
+  imagesToZipBlob,
 } from "../lib/export.js";
+
+/** Szuka ciągu bajtów `needle` gdziekolwiek w `haystack` — wystarczy do sprawdzenia, że metoda
+ * "store" (bez kompresji) faktycznie osadziła oryginalne, nietknięte bajty zdjęcia w ZIP-ie. */
+function containsBytes(haystack, needle) {
+  outer: for (let i = 0; i <= haystack.length - needle.length; i += 1) {
+    for (let j = 0; j < needle.length; j += 1) {
+      if (haystack[i + j] !== needle[j]) continue outer;
+    }
+    return true;
+  }
+  return needle.length === 0;
+}
 
 const FIELD_ORDER = ["product_name", "sku", "price"];
 
@@ -106,6 +119,40 @@ test("productsToXlsxBlob generuje prawdziwy plik XLSX jako ZIP z arkuszem", asyn
   assert.match(text, /\[Content_Types\]\.xml/);
   assert.match(text, /xl\/worksheets\/sheet1\.xml/);
   assert.match(text, /Krzesło biurowe/);
+});
+
+test("imagesToZipBlob pakuje wiele zdjęć (surowe bajty binarne) do jednego pliku ZIP", async () => {
+  // Regresja dla "pobieranie zdjęć ma iść masowo, jednym plikiem, nie N osobnych pobrań" —
+  // sidepanel/main.js woła to zamiast N wywołań chrome.downloads.download.
+  const img1 = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x01, 0x02, 0x03]); // fragment nagłówka JPEG + śmieciowe bajty
+  const img2 = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0xaa, 0xbb, 0xcc]); // fragment nagłówka PNG + śmieciowe bajty
+  const blob = imagesToZipBlob([
+    { name: "produkt-1.jpg", bytes: img1 },
+    { name: "produkt-2.png", bytes: img2 },
+  ]);
+  assert.equal(blob.type, "application/zip");
+
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  assert.equal(bytes[0], 0x50); // "P" — sygnatura ZIP (PK\x03\x04)
+  assert.equal(bytes[1], 0x4b); // "K"
+
+  // Metoda "store" (bez kompresji) — oryginalne bajty obu zdjęć muszą być dosłownie w archiwum.
+  assert.ok(containsBytes(bytes, img1));
+  assert.ok(containsBytes(bytes, img2));
+
+  const text = new TextDecoder().decode(bytes);
+  assert.match(text, /produkt-1\.jpg/);
+  assert.match(text, /produkt-2\.png/);
+});
+
+test("imagesToZipBlob na pustej liście nadal zwraca poprawny (pusty) plik ZIP", async () => {
+  const blob = imagesToZipBlob([]);
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  // Sam "end of central directory record" — sygnatura PK\x05\x06.
+  assert.equal(bytes[0], 0x50);
+  assert.equal(bytes[1], 0x4b);
+  assert.equal(bytes[2], 0x05);
+  assert.equal(bytes[3], 0x06);
 });
 
 test("normalizeImageTemplate buduje wzór z domeny zgodny z adapter request", () => {

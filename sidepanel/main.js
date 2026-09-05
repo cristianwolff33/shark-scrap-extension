@@ -1,7 +1,7 @@
 import { PRODUCT_FIELDS, createDefaultConfig, slugifyDomain } from "../lib/schema.js";
 import { createBridgeClient } from "../lib/bridge-client.js";
 import { loadBridgeSettings, loadConfig, saveBridgeSettings, saveConfig, loadOpenAiSettings, saveOpenAiSettings } from "../lib/storage.js";
-import { productsToAdapterRows, rowsToCsv, rowsToJsonBlob, rowsToXlsxBlob } from "../lib/export.js";
+import { productsToAdapterRows, rowsToCsv, rowsToJsonBlob, rowsToXlsxBlob, imagesToZipBlob } from "../lib/export.js";
 import { generateAdapterRows } from "../lib/openai-client.js";
 import { formatScanProgress } from "../lib/crawler.js";
 import * as fsdir from "../lib/fsdir.js";
@@ -683,8 +683,29 @@ function extensionFromUrl(url, contentType) {
 }
 
 const IMAGE_EXPORT_CAP = 500;
-const IMAGE_FETCH_DELAY_MS = 120; // uprzejmość wobec CDN sklepu
+const IMAGE_FETCH_CONCURRENCY = 6; // pobieranie równoległe zamiast pojedynczo jedno-po-drugim — nadal ograniczone, żeby nie zasypać CDN sklepu setkami jednoczesnych połączeń
 
+/** Uruchamia `worker` na wszystkich `items`, max `limit` naraz — proste pulowanie równoległości bez zależności. */
+async function runWithConcurrency(items, limit, worker) {
+  let index = 0;
+  async function runNext() {
+    while (index < items.length) {
+      const current = index;
+      index += 1;
+      await worker(items[current], current);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, runNext));
+}
+
+/**
+ * Pobiera zdjęcia RÓWNOLEGLE (nie sekwencyjnie jak wcześniej) i — gdy przeglądarka nie wspiera
+ * File System Access API (brak wyboru folderu, patrz fsdir.js) — pakuje je do JEDNEGO pliku ZIP
+ * i pobiera go JEDNĄ operacją, zamiast N osobnych wpisów w chrome.downloads (denerwujące i wolne
+ * przy dziesiątkach/setkach zdjęć). Gdy folder wyjściowy JEST dostępny, zapisujemy zdjęcia od razu
+ * jako osobne pliki w realnym folderze — tam nic nie "zaśmieca" paska pobierania, więc paczkowanie
+ * do ZIP-a byłoby zbędnym krokiem pośrednim.
+ */
 async function onExportImages() {
   if (!(await ensureScanResults())) return;
   readFormIntoConfig();
@@ -694,8 +715,9 @@ async function onExportImages() {
   btn.disabled = true;
   try {
     const domainSlug = slugifyDomain(state.config.domain);
+    const useFsDir = fsdir.isSupported();
     let imagesDirHandle = null;
-    if (fsdir.isSupported()) {
+    if (useFsDir) {
       const dir = await ensureOutputDir();
       const domainDir = await fsdir.subdir(dir, domainSlug);
       imagesDirHandle = await fsdir.subdir(domainDir, "images");
@@ -716,32 +738,41 @@ async function onExportImages() {
 
     let done = 0;
     let failed = 0;
-    for (const task of tasks) {
-      progressEl.textContent = `Pobieranie zdjęć: ${done + failed}/${tasks.length}…`;
+    const zipEntries = []; // wypełniane tylko gdy !useFsDir — trzymamy bajty w pamięci do jednego ZIP-a na końcu
+
+    await runWithConcurrency(tasks, IMAGE_FETCH_CONCURRENCY, async (task) => {
       try {
         const res = await fetch(task.url);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const blob = await res.blob();
         const filename = `${task.name}.${extensionFromUrl(task.url, res.headers.get("content-type"))}`;
-        if (imagesDirHandle) {
-          await fsdir.writeFile(imagesDirHandle, filename, blob);
+        if (useFsDir) {
+          await fsdir.writeFile(imagesDirHandle, filename, await res.blob());
         } else {
-          const objUrl = URL.createObjectURL(blob);
-          try {
-            await chrome.downloads.download({ url: objUrl, filename: `scraper-client/${domainSlug}/images/${filename}`, saveAs: false });
-          } finally {
-            setTimeout(() => URL.revokeObjectURL(objUrl), 10_000);
-          }
+          zipEntries.push({ name: filename, bytes: new Uint8Array(await res.arrayBuffer()) });
         }
         done += 1;
       } catch (err) {
         failed += 1;
         log(`Błąd pobierania zdjęcia ${task.url}: ${err.message || err}`);
       }
-      await new Promise((r) => setTimeout(r, IMAGE_FETCH_DELAY_MS));
+      progressEl.textContent = `Pobieranie zdjęć: ${done + failed}/${tasks.length}…`;
+    });
+
+    let zipFilename = "";
+    if (!useFsDir && zipEntries.length > 0) {
+      progressEl.textContent = `Pakowanie ${zipEntries.length} zdjęć do jednego pliku ZIP…`;
+      const zipBlob = imagesToZipBlob(zipEntries);
+      zipFilename = `${domainSlug}-zdjecia.zip`;
+      const objUrl = URL.createObjectURL(zipBlob);
+      try {
+        await chrome.downloads.download({ url: objUrl, filename: `scraper-client/${domainSlug}/${zipFilename}`, saveAs: false });
+      } finally {
+        setTimeout(() => URL.revokeObjectURL(objUrl), 10_000);
+      }
     }
 
-    progressEl.textContent = `Gotowe: ${done} zdjęć pobranych${failed ? `, ${failed} błędów (patrz log)` : ""}.`;
+    const doneNote = useFsDir ? `${done} zdjęć zapisanych` : zipFilename ? `${done} zdjęć spakowanych do ${zipFilename}` : "0 zdjęć";
+    progressEl.textContent = `Gotowe: ${doneNote}${failed ? `, ${failed} błędów (patrz log)` : ""}.`;
     toast(failed ? `Zdjęcia pobrane (${done}, ${failed} błędów)` : done > 0 ? "Zdjęcia pobrane" : "Nie znaleziono żadnych zdjęć w wynikach skanu");
   } catch (err) {
     toastError(err);

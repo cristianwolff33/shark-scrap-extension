@@ -116,12 +116,12 @@ async function extractFieldsByMapFromDoc(doc, pageUrl, fieldMap) {
   return normalizeUrlFields(fields, pageUrl);
 }
 
-/** Grupuje elementy strony wg sygnatury (tag + stabilna klasa) i szuka powtarzalnych "kart produktu". */
+/** Grupuje elementy strony wg sygnatury (tag + stabilna klasa, albo tag + atrybut testowy) i szuka powtarzalnych "kart produktu". */
 async function detectListingFromDoc(doc, pageUrl = location.href) {
-  const [{ pickStableClass }, { groupSignature, pickBestGroup, pickBestProductLinkCandidate, PRICE_LIKE_RE }] = await Promise.all([
-    loadLib("selectors.js"),
-    loadLib("listing.js"),
-  ]);
+  const [
+    { pickStableClass, pickTestId },
+    { groupSignature, groupSignatureForAttr, pickBestGroup, pickBestProductLinkCandidate, PRICE_LIKE_RE },
+  ] = await Promise.all([loadLib("selectors.js"), loadLib("listing.js")]);
 
   /** @type {Map<string, {selector:string, els:Element[]}>} */
   const groups = new Map();
@@ -132,9 +132,15 @@ async function detectListingFromDoc(doc, pageUrl = location.href) {
     const tag = el.tagName.toLowerCase();
     if (["script", "style", "svg", "path", "nav", "header", "footer"].includes(tag)) continue;
     const stableClass = pickStableClass(el);
-    if (!stableClass) continue; // bez stabilnej klasy zbyt ryzykowne grupowanie
-    const sig = groupSignature(tag, stableClass);
-    if (!groups.has(sig)) groups.set(sig, { selector: `${tag}.${stableClass}`, els: [] });
+    // Fallback na atrybut testowy (data-testid itp.), gdy element ma tylko klasy hashowane
+    // przez css-in-js/CSS modules — bez tego takie strony (częste w nowoczesnych frontendach)
+    // w ogóle nie trafiały do żadnej grupy.
+    const testId = stableClass ? null : pickTestId(el);
+    if (!stableClass && !testId) continue;
+    const sig = stableClass ? groupSignature(tag, stableClass) : groupSignatureForAttr(tag, testId.attr, testId.value);
+    // `sig` jest już poprawnym, escapowanym selektorem CSS (patrz groupSignature/groupSignatureForAttr)
+    // — używamy go wprost, żeby nie duplikować (i przypadkiem rozjechać) budowanie selektora.
+    if (!groups.has(sig)) groups.set(sig, { selector: sig, els: [] });
     groups.get(sig).els.push(el);
   }
 
@@ -176,6 +182,12 @@ async function detectListing() {
   return detectListingFromDoc(document);
 }
 
+function isDisabledCandidateEl(el) {
+  if (el.disabled === true) return true;
+  if ((el.getAttribute("aria-disabled") || "").toLowerCase() === "true") return true;
+  return !!(el.closest && el.closest("[disabled], [aria-disabled='true'], .disabled"));
+}
+
 async function detectPaginationFromDoc(doc) {
   const { pickNextLinkCandidate, pickLoadMoreCandidate } = await loadLib("listing.js");
   const { generateSelector } = await loadLib("selectors.js");
@@ -185,11 +197,21 @@ async function detectPaginationFromDoc(doc) {
     selector: "",
     text: (a.textContent || "").trim(),
     rel: a.getAttribute("rel") || "",
+    ariaLabel: a.getAttribute("aria-label") || "",
     hasHref: !!a.getAttribute("href"),
   }));
+  // Sporo CMS-ów (WordPress i inne) emituje SEO-owy <link rel="next" href="..."> w <head>,
+  // niezależnie od tego, czy w <body> w ogóle jest widoczny link "następna strona" — to bardzo
+  // rzetelny sygnał, kompletnie pomijany wcześniej, bo skanowaliśmy tylko <a> w treści strony.
+  const headNext = doc.querySelector('head link[rel~="next"]');
+  if (headNext && headNext.getAttribute("href")) {
+    links.unshift({ el: headNext, selector: "", text: "", rel: "next", ariaLabel: "", hasHref: true });
+  }
   const buttons = Array.from(doc.querySelectorAll("button, a")).map((el) => ({
     el,
     text: (el.textContent || "").trim(),
+    ariaLabel: el.getAttribute("aria-label") || "",
+    disabled: isDisabledCandidateEl(el),
   }));
 
   const next = pickNextLinkCandidate(links);
@@ -239,7 +261,14 @@ function pickProductLinkFromCard(card, urlSelector, urlAttribute, priceLikeRe, p
 
 function extractItemUrlsFromDoc(doc, itemSelector, urlSelector, urlAttribute, baseUrl, resolveUrl, priceLikeRe, pickBestProductLinkCandidate) {
   if (!itemSelector) return [];
-  const cards = Array.from(doc.querySelectorAll(itemSelector));
+  let cards;
+  try {
+    cards = Array.from(doc.querySelectorAll(itemSelector));
+  } catch {
+    // Selektor mógł zostać zapisany ręcznie/wcześniej i być niepoprawny na tej wersji strony —
+    // nie wywalamy całego skanu, tylko spadamy na fallback (extractLikelyProductUrlsFromDoc).
+    return [];
+  }
   const urls = [];
   for (const card of cards) {
     const link = pickProductLinkFromCard(card, urlSelector, urlAttribute, priceLikeRe, pickBestProductLinkCandidate);
@@ -315,6 +344,12 @@ function extractPaginationUrlsFromDoc(doc, pagination, currentUrl, baseUrl, reso
     }
   }
 
+  // Niezależnie od trybu wykrytego na pierwszej stronie: <link rel="next"> w <head> sprawdzamy
+  // zawsze, na każdej stronie z osobna — to niezawodny sygnał SEO, którego brak na jednej
+  // stronie (albo inny next_selector) nie powinien przerywać podążania za paginacją.
+  const headNext = doc.querySelector('head link[rel~="next"]');
+  if (headNext) add(headNext.getAttribute("href"));
+
   for (const a of Array.from(doc.querySelectorAll("a[href]"))) {
     if (a.closest?.("[disabled], [aria-disabled='true'], .disabled")) continue;
     const candidate = {
@@ -376,6 +411,82 @@ function sendProduct(product) {
 
 const HARD_PRODUCT_CAP = 2000;
 const REQUEST_DELAY_MS = 350; // uprzejmość wobec serwera sklepu — ten sam rząd wielkości co request_delay_seconds frameworka
+const LOAD_MORE_MAX_CLICKS = 60;
+const LOAD_MORE_STABLE_ROUNDS_LIMIT = 2; // ile kliknięć z rzędu bez przyrostu kart = koniec listy
+const LOAD_MORE_WAIT_TIMEOUT_MS = 6000; // ile czekamy po kliknięciu, aż strona doładuje nowe karty (AJAX)
+const LOAD_MORE_POLL_INTERVAL_MS = 250;
+
+/** Liczy dopasowania selektora na ŻYWEJ stronie, bezpiecznie (selektor mógł być wygenerowany z klasy, która okazała się niepoprawna w praktyce). */
+function safeCount(selector) {
+  if (!selector) return 0;
+  try {
+    return document.querySelectorAll(selector).length;
+  } catch {
+    return 0;
+  }
+}
+
+/** Czeka aż liczba dopasowań selektora wzrośnie ponad `previousCount` (strona doładowała AJAX-em) albo upłynie timeout. */
+function waitForCountIncrease(selector, previousCount, timeoutMs) {
+  return new Promise((resolve) => {
+    const start = Date.now();
+    const check = () => {
+      if (safeCount(selector) > previousCount || scanStopRequested) {
+        resolve();
+        return;
+      }
+      if (Date.now() - start >= timeoutMs) {
+        resolve();
+        return;
+      }
+      setTimeout(check, LOAD_MORE_POLL_INTERVAL_MS);
+    };
+    check();
+  });
+}
+
+/**
+ * Realnie klika przycisk "Załaduj więcej" na ŻYWEJ stronie (tej samej karcie, w której user
+ * uruchomił skan) i czeka, aż DOM doładuje kolejne karty — tak jak zrobiłby to człowiek. To
+ * jedyny sposób, żeby obsłużyć load-more bez Playwrighta: fetch()+DOMParser (używany do
+ * kolejnych stron next_link) nie wykonuje JS-a strony, więc nigdy by nie zobaczył efektu
+ * kliknięcia. Działa TYLKO na bieżącej, żywej stronie (nie na fetchowanych kopiach) i tylko
+ * dla trybu "load_more" z rozpoznanym przyciskiem — infinite_scroll (doładowanie na scrollu,
+ * bez jawnego przycisku) zostaje nieobsłużone, bo nie ma tu jednego niezawodnego triggera.
+ * Zatrzymuje się, gdy: przycisk zniknie/będzie disabled/niewidoczny, osiągniemy limit
+ * produktów, dwa kliknięcia z rzędu nie dadzą przyrostu kart, albo user kliknie "Stop".
+ */
+async function autoExpandLoadMore(pagination, itemSelector, productCap) {
+  if (!pagination || pagination.mode !== "load_more" || !pagination.load_more_selector) {
+    return { clicks: 0 };
+  }
+  let clicks = 0;
+  let stableRounds = 0;
+  let lastCount = safeCount(itemSelector);
+
+  while (clicks < LOAD_MORE_MAX_CLICKS && stableRounds < LOAD_MORE_STABLE_ROUNDS_LIMIT && !scanStopRequested) {
+    if (Number.isFinite(productCap) && productCap > 0 && lastCount >= productCap) break;
+    let btn;
+    try {
+      btn = document.querySelector(pagination.load_more_selector);
+    } catch {
+      break;
+    }
+    if (!btn || isDisabledCandidateEl(btn) || btn.offsetParent === null) break; // brak przycisku / wyłączony / niewidoczny = koniec listy
+
+    btn.scrollIntoView({ block: "center", behavior: "instant" });
+    btn.click();
+    clicks += 1;
+    sendProgress({ phase: "listing", pagesVisited: 1, pagesTotal: 1, productsFound: lastCount });
+
+    await waitForCountIncrease(itemSelector, lastCount, LOAD_MORE_WAIT_TIMEOUT_MS);
+    const newCount = safeCount(itemSelector);
+    stableRounds = newCount > lastCount ? 0 : stableRounds + 1;
+    lastCount = newCount;
+    await sleep(REQUEST_DELAY_MS); // uprzejmość wobec serwera, tak jak przy fetchowaniu kolejnych stron
+  }
+  return { clicks, finalCount: lastCount };
+}
 
 /**
  * Pełny auto-skan: wykrywa listing+paginację+pola produktowe na bieżącej stronie (bez pytania
@@ -427,7 +538,15 @@ async function scanCatalog({ maxPages, maxProducts, useAI, apiKey, aiModel, aiPr
   const effectiveMaxPages = Number.isFinite(maxPages) && maxPages > 0 ? maxPages : (pagination.max_pages || 20);
   const productCap = Math.min(Number.isFinite(maxProducts) && maxProducts > 0 ? maxProducts : HARD_PRODUCT_CAP, HARD_PRODUCT_CAP);
 
-  if (pagination.mode !== "none" && !isAutoFollowablePagination(pagination)) {
+  if (pagination.mode === "load_more") {
+    sendProgress({ phase: "listing", pagesVisited: 1, pagesTotal: 1, productsFound: safeCount(listing.item_selector) });
+    const expandResult = await autoExpandLoadMore(pagination, listing.item_selector, productCap);
+    if (expandResult.clicks > 0) {
+      warnings.push(`Kliknięto "Załaduj więcej" ${expandResult.clicks}× na żywej stronie — doładowano do ${expandResult.finalCount} kart produktowych.`);
+    } else {
+      warnings.push(`Wykryto przycisk "Załaduj więcej", ale nie udało się go automatycznie kliknąć/doładować kolejnych produktów — sprawdź selektor ręcznie.`);
+    }
+  } else if (pagination.mode !== "none" && !isAutoFollowablePagination(pagination)) {
     warnings.push(`Wykryto paginację typu "${pagination.mode}" (experimental) — spróbuję jeszcze linki z href/numery stron, ale przyciski wymagające JS mogą wymagać trybu Playwright.`);
   }
 
@@ -468,7 +587,15 @@ async function scanCatalog({ maxPages, maxProducts, useAI, apiKey, aiModel, aiPr
       PRICE_LIKE_RE,
       pickBestProductLinkCandidate
     );
-    const fallbackUrlsOnPage = extractLikelyProductUrlsFromDoc(currentDoc, currentUrl, resolveUrl, PRICE_LIKE_RE, scoreProductLinkCandidate);
+    // Fallback (skan WSZYSTKICH linków na stronie wg score'u) używamy TYLKO, gdy strukturalna
+    // detekcja kart (item_selector) nic nie znalazła na tej stronie. Wcześniej dokładaliśmy go
+    // zawsze, przez co nawet przy poprawnie wykrytych kartach produktów do wyniku wpadały linki
+    // do kategorii/menu/filtrów, które przypadkiem miały zdjęcie i sensowną długość tekstu —
+    // wtyczka ma łapać wyłącznie produkty, nie "wszystko co wygląda trochę jak produkt".
+    const fallbackUrlsOnPage =
+      urlsOnPage.length > 0
+        ? []
+        : extractLikelyProductUrlsFromDoc(currentDoc, currentUrl, resolveUrl, PRICE_LIKE_RE, scoreProductLinkCandidate);
     productUrls = dedupe(
       [...productUrls, ...urlsOnPage, ...fallbackUrlsOnPage]
         .map(normalizeCrawlUrl)

@@ -1,7 +1,7 @@
 import { PRODUCT_FIELDS, createDefaultConfig, slugifyDomain } from "../lib/schema.js";
 import { createBridgeClient } from "../lib/bridge-client.js";
 import { loadBridgeSettings, loadConfig, saveBridgeSettings, saveConfig, loadAiSettings, saveAiSettings } from "../lib/storage.js";
-import { productsToAdapterRows, rowsToCsv, rowsToJsonBlob, rowsToXlsxBlob, imagesToZipBlob, filesToZipBlob, slugifyBrand, normalizeImageTemplate, guessFullSizeImageUrl } from "../lib/export.js";
+import { productsToAdapterRows, rowsToCsv, rowsToJsonBlob, rowsToXlsxBlob, imagesToZipBlob, filesToZipBlob, slugifyBrand, normalizeImageTemplate, guessFullSizeImageUrls } from "../lib/export.js";
 import { generateAdapterRows as generateAdapterRowsCodex, DEFAULT_MODEL as CODEX_DEFAULT_MODEL } from "../lib/openai-client.js";
 import { generateAdapterRows as generateAdapterRowsClaude, DEFAULT_MODEL as CLAUDE_DEFAULT_MODEL } from "../lib/anthropic-client.js";
 import { formatScanProgress } from "../lib/crawler.js";
@@ -780,22 +780,36 @@ async function runWithConcurrency(items, limit, worker) {
 }
 
 /**
- * Próbuje pobrać PEŁNOWYMIAROWĄ wersję zdjęcia (zgadywaną z typowego wzorca nazewnictwa
- * miniaturki WordPress/WooCommerce — patrz guessFullSizeImageUrl), a dopiero gdy się nie uda
- * (zgadywany URL nie istnieje / błąd sieci), spada na oryginalny URL wykryty na stronie. NIGDY
- * nie ufamy zgadniętemu URL-owi w ciemno — weryfikacja to sam fakt udanego pobrania.
+ * Pobiera zdjęcie z `referrerPolicy: "no-referrer"` — część CDN-ów blokuje "hotlinking" po
+ * nagłówku Referer (a czasem, zamiast zwykłego 403, po cichu podstawia MAŁY placeholder/
+ * watermark ZAMIAST prawdziwego zdjęcia, ze statusem 200 — co wyglądałoby dokładnie jak
+ * "wtyczka pobiera małe zdjęcia", mimo że plik "istnieje"). fetch() wywołany z poziomu side
+ * panelu (origin chrome-extension://…) i tak nigdy nie wyśle Referer zgodnego z domeną sklepu,
+ * więc jawne no-referrer jest bezpieczniejsze niż domyślne zachowanie przeglądarki — część
+ * zabezpieczeń hotlink-owych explicite PRZEPUSZCZA żądania bez Referer (nie potrafią odróżnić
+ * ich od bezpośredniego wejścia w URL), ale blokuje te z NIEPASUJĄCYM Refererem.
+ */
+function fetchImage(url) {
+  return fetch(url, { referrerPolicy: "no-referrer" });
+}
+
+/**
+ * Próbuje pobrać PEŁNOWYMIAROWĄ wersję zdjęcia, zgadywaną z typowych wzorców nazewnictwa/query
+ * stringa miniaturek (WordPress/WooCommerce, Shopify, CDN-y resize-as-a-service — patrz
+ * guessFullSizeImageUrls), próbując KOLEJNO wszystkich kandydatów, a dopiero gdy ŻADEN nie
+ * zadziała, spada na oryginalny URL wykryty na stronie. NIGDY nie ufamy zgadniętemu URL-owi w
+ * ciemno — weryfikacja to sam fakt udanego pobrania (status ok).
  */
 async function fetchImageWithFullSizeUpgrade(url) {
-  const upgraded = guessFullSizeImageUrl(url);
-  if (upgraded) {
+  for (const candidate of guessFullSizeImageUrls(url)) {
     try {
-      const res = await fetch(upgraded);
+      const res = await fetchImage(candidate);
       if (res.ok) return res;
     } catch {
-      // zgadywany pełny rozmiar nie istnieje/błąd sieci — spadamy na oryginalny URL niżej
+      // ten konkretny kandydat nie istnieje/błąd sieci — próbujemy kolejnego, potem oryginału
     }
   }
-  return fetch(url);
+  return fetchImage(url);
 }
 
 /**
@@ -822,9 +836,11 @@ async function fetchProductImages(onProgress) {
   // ten sam slug co [marka] w linkach eksportu (patrz lib/export.js, slugifyBrand) — musi się
   // zgadzać, żeby link w CSV/XLSX wskazywał na realną strukturę folderów po wgraniu na domenę.
   const tasks = [];
+  let totalAvailable = 0; // liczba zdjęć wykrytych w skanie, ZANIM przytniemy do IMAGE_EXPORT_CAP — do wykrycia obcięcia
   state.scanProducts.forEach((product, idx) => {
-    if (tasks.length >= IMAGE_EXPORT_CAP) return;
     const urls = product.fields?.images?.values || (product.fields?.images?.value ? [product.fields.images.value] : []);
+    totalAvailable += urls.length;
+    if (tasks.length >= IMAGE_EXPORT_CAP) return;
     const baseName = slugifyDomain(fieldText(product.fields, "sku") || `produkt-${idx + 1}`);
     const brandSlug = slugifyBrand(fieldText(product.fields, "brand"));
     urls.forEach((url, i) => {
@@ -864,7 +880,7 @@ async function fetchProductImages(onProgress) {
     if (onProgress) onProgress(`Pobieranie zdjęć: ${done + failed}/${tasks.length}…`);
   });
 
-  return { useFsDir, done, failed, total: tasks.length, zipEntries };
+  return { useFsDir, done, failed, total: tasks.length, totalAvailable, truncated: totalAvailable > tasks.length, zipEntries };
 }
 
 async function onExportImages() {
@@ -876,9 +892,12 @@ async function onExportImages() {
   btn.disabled = true;
   try {
     const domainSlug = slugifyDomain(state.config.domain);
-    const { useFsDir, done, failed, zipEntries } = await fetchProductImages((text) => {
+    const { useFsDir, done, failed, zipEntries, truncated, totalAvailable } = await fetchProductImages((text) => {
       progressEl.textContent = text;
     });
+    if (truncated) {
+      log(`Uwaga: znaleziono ${totalAvailable} zdjęć, ale limit bezpieczeństwa (${IMAGE_EXPORT_CAP}) obciął listę — część zdjęć NIE została pobrana.`);
+    }
 
     let zipFilename = "";
     if (!useFsDir && zipEntries.length > 0) {
@@ -892,8 +911,8 @@ async function onExportImages() {
     }
 
     const doneNote = useFsDir ? `${done} zdjęć zapisanych` : zipFilename ? `${done} zdjęć spakowanych do ${zipFilename}` : "0 zdjęć";
-    progressEl.textContent = `Gotowe: ${doneNote}${failed ? `, ${failed} błędów (patrz log)` : ""}.`;
-    toast(failed ? `Zdjęcia pobrane (${done}, ${failed} błędów)` : done > 0 ? "Zdjęcia pobrane" : "Nie znaleziono żadnych zdjęć w wynikach skanu");
+    progressEl.textContent = `Gotowe: ${doneNote}${failed ? `, ${failed} błędów (patrz log)` : ""}${truncated ? ` — UWAGA: obcięto do limitu ${IMAGE_EXPORT_CAP}/${totalAvailable}` : ""}.`;
+    toast(truncated ? `Zdjęcia pobrane (${done}) — obcięte do limitu ${IMAGE_EXPORT_CAP}/${totalAvailable}` : failed ? `Zdjęcia pobrane (${done}, ${failed} błędów)` : done > 0 ? "Zdjęcia pobrane" : "Nie znaleziono żadnych zdjęć w wynikach skanu");
   } catch (err) {
     toastError(err);
   } finally {
@@ -973,8 +992,12 @@ async function onDownloadFull() {
     const zipFilename = `${domainSlug}-pelny-eksport.zip`;
     await downloadBlobViaChrome(zipBlob, zipFilename);
 
-    progressEl.textContent = `Download Full: gotowe — ${zipFilename} (folder ${domainSlug}/ w środku, ${images.done} zdjęć${images.failed ? `, ${images.failed} błędów zdjęć` : ""}).`;
-    toast(`Pełne pobranie gotowe: ${zipFilename}`);
+    if (images.truncated) {
+      log(`Download Full: znaleziono ${images.totalAvailable} zdjęć, ale limit bezpieczeństwa (${IMAGE_EXPORT_CAP}) obciął listę — część zdjęć NIE trafiła do ZIP-a.`);
+    }
+    const truncNote = images.truncated ? ` — UWAGA: zdjęcia obcięte do limitu ${IMAGE_EXPORT_CAP}/${images.totalAvailable}` : "";
+    progressEl.textContent = `Download Full: gotowe — ${zipFilename} (folder ${domainSlug}/ w środku, ${images.done} zdjęć${images.failed ? `, ${images.failed} błędów zdjęć` : ""}${truncNote}).`;
+    toast(`Pełne pobranie gotowe: ${zipFilename}${truncNote}`);
     log(`Download Full: spakowano CSV+XLSX+JSON+${images.done} zdjęć do ${zipFilename} (folder ${domainSlug}/ w środku).`);
   } catch (err) {
     toastError(err);

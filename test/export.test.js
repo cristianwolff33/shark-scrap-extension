@@ -14,6 +14,7 @@ import {
   filesToZipBlob,
   slugifyBrand,
   guessFullSizeImageUrl,
+  guessFullSizeImageUrls,
 } from "../lib/export.js";
 
 /** Szuka ciągu bajtów `needle` gdziekolwiek w `haystack` — wystarczy do sprawdzenia, że metoda
@@ -202,6 +203,30 @@ test("guessFullSizeImageUrl zwraca pusty string, gdy URL nie pasuje do wzorca mi
   assert.equal(guessFullSizeImageUrl(undefined), "");
   // Rok w URL-u (2024) nie powinien być mylnie wzięty za wymiary miniaturki.
   assert.equal(guessFullSizeImageUrl("https://sklep.pl/wp-content/uploads/2024/01/produkt.jpg"), "");
+});
+
+test("guessFullSizeImageUrls rozpoznaje też wariant Shopify (podkreślnik + opis przycięcia)", () => {
+  assert.deepEqual(guessFullSizeImageUrls("https://cdn.shopify.com/produkt_1024x1024.jpg"), ["https://cdn.shopify.com/produkt.jpg"]);
+  assert.deepEqual(guessFullSizeImageUrls("https://cdn.shopify.com/produkt_100x100_crop_center.jpg"), [
+    "https://cdn.shopify.com/produkt.jpg",
+  ]);
+});
+
+test("guessFullSizeImageUrls zdejmuje parametry rozmiaru z query stringa (Cloudinary/Imgix-style CDN-y)", () => {
+  const candidates = guessFullSizeImageUrls("https://cdn.przyklad.pl/img/produkt.jpg?width=300&height=300&auto=format");
+  assert.ok(candidates.includes("https://cdn.przyklad.pl/img/produkt.jpg?auto=format"));
+});
+
+test("guessFullSizeImageUrls łączy oba warianty, gdy pasują oba wzorce naraz", () => {
+  const candidates = guessFullSizeImageUrls("https://cdn.pl/produkt-300x300.jpg?w=300");
+  assert.equal(candidates.length, 2);
+  assert.ok(candidates.includes("https://cdn.pl/produkt.jpg?w=300")); // sufiks nazwy zdjęty, query zostaje
+  assert.ok(candidates.includes("https://cdn.pl/produkt-300x300.jpg")); // query zdjęty, sufiks nazwy zostaje
+});
+
+test("guessFullSizeImageUrls zwraca [] gdy nic nie pasuje", () => {
+  assert.deepEqual(guessFullSizeImageUrls("https://sklep.pl/img/produkt.jpg"), []);
+  assert.deepEqual(guessFullSizeImageUrls(""), []);
 });
 
 test("productsToAdapterRows tworzy finalną strukturę kolumn (w tym GPSR) i linki zdjN z segmentem marki", () => {

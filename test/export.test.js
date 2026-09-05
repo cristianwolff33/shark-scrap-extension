@@ -229,6 +229,24 @@ test("guessFullSizeImageUrls zwraca [] gdy nic nie pasuje", () => {
   assert.deepEqual(guessFullSizeImageUrls(""), []);
 });
 
+test("guessFullSizeImageUrls rozpoznaje rozmiar zakodowany w SEGMENCIE ŚCIEŻKI, nie w nazwie pliku (Rozetka i podobne)", () => {
+  // Realny przypadek zweryfikowany live na rozetka.com.ua: zdjęcia leżą w osobnych folderach wg
+  // rozmiaru zamiast sufiksu w nazwie pliku — "/medium/" dawało miniaturkę 80x99px,
+  // "/original/" to samo zdjęcie w pełnej rozdzielczości 2112x2608px.
+  const candidates = guessFullSizeImageUrls("https://content.rozetka.com.ua/goods/images/medium/594345358.jpg");
+  assert.ok(candidates.includes("https://content.rozetka.com.ua/goods/images/original/594345358.jpg"));
+  assert.equal(candidates[0], "https://content.rozetka.com.ua/goods/images/original/594345358.jpg");
+});
+
+test("guessFullSizeImageUrls: segment ścieżki rozmiaru — dopasowanie niezależne od wielkości liter, podmieniany tylko PIERWSZY segment", () => {
+  const candidates = guessFullSizeImageUrls("https://cdn.pl/Thumbs/small/produkt.jpg");
+  assert.ok(candidates.some((c) => c === "https://cdn.pl/original/small/produkt.jpg"));
+});
+
+test("guessFullSizeImageUrls nie rusza URL-i bez rozpoznanego segmentu rozmiaru w ścieżce", () => {
+  assert.deepEqual(guessFullSizeImageUrls("https://sklep.pl/goods/images/594345358.jpg"), []);
+});
+
 test("productsToAdapterRows tworzy finalną strukturę kolumn (w tym GPSR) i linki zdjN z segmentem marki", () => {
   const rows = productsToAdapterRows(SAMPLE_PRODUCTS, "mojadomena.pl");
   assert.equal(rows[0].Cena, "199.99");

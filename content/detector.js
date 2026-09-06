@@ -585,6 +585,57 @@ function sendProduct(product) {
   }
 }
 
+const SCAN_HIGHLIGHT_MAX_ITEMS = 60; // efekt wizualny, nie skan — nie ma sensu animować setek kart naraz
+const SCAN_HIGHLIGHT_STAGGER_MS = 45; // odstęp między kolejnymi kartami, żeby wyglądało jak "przeczesywanie" listy
+
+/** Wstrzykuje raz style dla podświetlenia skanowanych kart (czysto kosmetyczny efekt "wow"). */
+function injectScanHighlightStyleOnce() {
+  if (document.getElementById("shark-scrap-highlight-style")) return;
+  const style = document.createElement("style");
+  style.id = "shark-scrap-highlight-style";
+  style.textContent = `
+    @keyframes shark-scrap-scan-pulse {
+      0% { box-shadow: 0 0 0 0 rgba(194, 232, 18, 0), 0 0 0 0 rgba(194, 232, 18, 0); }
+      12% { box-shadow: 0 0 0 3px rgba(194, 232, 18, 0.9), 0 0 28px 6px rgba(194, 232, 18, 0.65); }
+      100% { box-shadow: 0 0 0 3px rgba(194, 232, 18, 0), 0 0 28px 6px rgba(194, 232, 18, 0); }
+    }
+    .shark-scrap-scan-highlight {
+      animation: shark-scrap-scan-pulse 900ms ease-out !important;
+      border-radius: 6px;
+    }
+  `;
+  document.documentElement.appendChild(style);
+}
+
+/**
+ * Podświetla wykryte karty produktowe NA ŻYWEJ stronie (efekt "wow" — user widzi, jak wtyczka
+ * "przeczesuje" listing), z lekkim opóźnieniem między kartami dla efektu sekwencyjnego skanu.
+ * Wyłącznie kosmetyczne — błąd tutaj (np. nietypowy selektor) nie może przerwać właściwego skanu
+ * danych, więc każdy krok jest owinięty w try/catch. Podświetlenie stron pobranych przez
+ * fetch()/iframe pomijamy: user ich i tak nie widzi, więc animacja byłaby bez sensu.
+ * @param {Document} doc
+ * @param {string} itemSelector
+ */
+function highlightScannedItems(doc, itemSelector) {
+  if (doc !== document || !itemSelector) return;
+  try {
+    injectScanHighlightStyleOnce();
+    const items = Array.from(doc.querySelectorAll(itemSelector)).slice(0, SCAN_HIGHLIGHT_MAX_ITEMS);
+    items.forEach((el, index) => {
+      setTimeout(() => {
+        try {
+          el.classList.add("shark-scrap-scan-highlight");
+          el.addEventListener("animationend", () => el.classList.remove("shark-scrap-scan-highlight"), { once: true });
+        } catch {
+          // pojedyncza karta mogła zniknąć z DOM-u (np. re-render frameworka) — pomijamy ją
+        }
+      }, index * SCAN_HIGHLIGHT_STAGGER_MS);
+    });
+  } catch {
+    // kosmetyka — nigdy nie blokuje właściwego skanu
+  }
+}
+
 const HARD_PRODUCT_CAP = 2000;
 const REQUEST_DELAY_MS = 350; // uprzejmość wobec serwera sklepu — ten sam rząd wielkości co request_delay_seconds frameworka
 const LOAD_MORE_MAX_CLICKS = 60;
@@ -679,6 +730,7 @@ async function autoClickThroughPages(pagination, listing, baseUrl, resolveUrl, p
 
     previousKey = newKey;
     allUrls = Array.from(new Set([...allUrls, ...extractCurrent()]));
+    highlightScannedItems(document, listing.item_selector);
     await sleep(REQUEST_DELAY_MS);
   }
   return { clicks, collectedUrls: allUrls };
@@ -722,6 +774,7 @@ async function autoExpandLoadMore(pagination, itemSelector, productCap) {
     const newCount = safeCount(itemSelector);
     stableRounds = newCount > lastCount ? 0 : stableRounds + 1;
     lastCount = newCount;
+    highlightScannedItems(document, itemSelector);
     await sleep(REQUEST_DELAY_MS); // uprzejmość wobec serwera, tak jak przy fetchowaniu kolejnych stron
   }
   return { clicks, finalCount: lastCount };
@@ -763,6 +816,7 @@ async function autoScrollForMoreContent(itemSelector, productCap) {
     const newCount = safeCount(itemSelector);
     stableRounds = newCount > lastCount ? 0 : stableRounds + 1;
     lastCount = newCount;
+    highlightScannedItems(document, itemSelector);
     await sleep(REQUEST_DELAY_MS);
   }
   return { scrolls, finalCount: lastCount };
@@ -903,6 +957,7 @@ async function scanCatalog({ maxPages, maxProducts, useAI, apiKey, aiModel, aiPr
     }
 
     pagesVisited += 1;
+    highlightScannedItems(currentDoc, listing.item_selector);
     const urlsOnPage = extractItemUrlsFromDoc(
       currentDoc,
       listing.item_selector,

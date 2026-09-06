@@ -117,16 +117,46 @@ textarea {
 }
 
 .brand-mark {
+  position: relative;
   display: grid;
+  flex-shrink: 0;
   place-items: center;
-  width: 38px;
-  height: 38px;
-  border-radius: 8px;
-  background: var(--neon);
-  color: var(--violet);
-  font-size: 22px;
-  font-weight: 950;
+  width: 40px;
+  height: 40px;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: radial-gradient(circle at 30% 22%, rgba(194, 232, 18, 0.28), rgba(13, 4, 18, 0.92) 72%);
   box-shadow: 0 0 26px rgba(194, 232, 18, 0.45);
+  overflow: visible;
+}
+
+.brand-mark img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  transform: rotate(-8deg);
+  animation: brand-glitch 5s ease-in-out infinite;
+}
+
+/* Krótkie "przebłyski" chromatic-aberration w kolorach już użytych w UI (xlsx/json/danger) —
+   większość cyklu logo po prostu świeci, glitch trwa ułamek sekundy, żeby nie rozpraszać. */
+@keyframes brand-glitch {
+  0%, 85%, 100% {
+    filter: drop-shadow(0 0 5px rgba(194, 232, 18, 0.65));
+  }
+  87% {
+    filter: drop-shadow(2px 0 0 var(--xlsx)) drop-shadow(-2px 0 0 var(--danger)) drop-shadow(0 0 9px rgba(194, 232, 18, 0.7));
+    transform: rotate(-8deg) translateX(1px);
+  }
+  89% {
+    filter: drop-shadow(-2px 0 0 var(--xlsx)) drop-shadow(2px 0 0 var(--json)) drop-shadow(0 0 9px rgba(194, 232, 18, 0.7));
+    transform: rotate(-8deg) translateX(-1px);
+  }
+  91% {
+    filter: drop-shadow(0 0 5px rgba(194, 232, 18, 0.65));
+    transform: rotate(-8deg);
+  }
 }
 
 .app-name {

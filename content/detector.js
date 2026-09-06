@@ -586,7 +586,13 @@ function sendProduct(product) {
 }
 
 const SCAN_HIGHLIGHT_MAX_ITEMS = 60; // efekt wizualny, nie skan — nie ma sensu animować setek kart naraz
-const SCAN_HIGHLIGHT_STAGGER_MS = 45; // odstęp między kolejnymi kartami, żeby wyglądało jak "przeczesywanie" listy
+// User zgłosił, że pierwsza wersja (45ms) przelatywała przez całą siatkę błyskawicznie, zanim
+// realnie cokolwiek zostało pobrane — chciał, żeby podświetlanie szło W RYTMIE faktycznego
+// listowania/pobierania produktów, pojedynczo. Stąd wolniejszy odstęp TU (używany tylko tam,
+// gdzie i tak podświetlamy kilka/kilkanaście kart naraz, np. nowa strona po kliknięciu "dalej"),
+// a właściwe tempo dla głównego etapu pobierania produktów (patrz scanCatalog, krok 3) bierze się
+// z REALNEGO opóźnienia między produktami (REQUEST_DELAY_MS + czas fetcha), nie z setTimeout.
+const SCAN_HIGHLIGHT_STAGGER_MS = 220;
 
 /** Wstrzykuje raz style dla podświetlenia skanowanych kart (czysto kosmetyczny efekt "wow"). */
 function injectScanHighlightStyleOnce() {
@@ -608,32 +614,78 @@ function injectScanHighlightStyleOnce() {
 }
 
 /**
- * Podświetla wykryte karty produktowe NA ŻYWEJ stronie (efekt "wow" — user widzi, jak wtyczka
- * "przeczesuje" listing), z lekkim opóźnieniem między kartami dla efektu sekwencyjnego skanu.
- * Wyłącznie kosmetyczne — błąd tutaj (np. nietypowy selektor) nie może przerwać właściwego skanu
- * danych, więc każdy krok jest owinięty w try/catch. Podświetlenie stron pobranych przez
- * fetch()/iframe pomijamy: user ich i tak nie widzi, więc animacja byłaby bez sensu.
- * @param {Document} doc
- * @param {string} itemSelector
+ * Podświetla POJEDYNCZĄ kartę na żywej stronie (efekt "wow"). To jest podstawowy budulec — do
+ * prawdziwej synchronizacji z tempem skanu (krok 3 w scanCatalog) wywołujemy to bezpośrednio w
+ * pętli pobierającej kolejne produkty, więc tempo podświetlania = realne tempo pobierania, bez
+ * żadnego sztucznego opóźnienia. Wyłącznie kosmetyczne — błąd tutaj nigdy nie blokuje skanu.
+ * @param {Element|undefined|null} el
  */
-function highlightScannedItems(doc, itemSelector) {
-  if (doc !== document || !itemSelector) return;
+function highlightScannedItem(el) {
+  if (!el) return;
   try {
     injectScanHighlightStyleOnce();
-    const items = Array.from(doc.querySelectorAll(itemSelector)).slice(0, SCAN_HIGHLIGHT_MAX_ITEMS);
-    items.forEach((el, index) => {
-      setTimeout(() => {
-        try {
-          el.classList.add("shark-scrap-scan-highlight");
-          el.addEventListener("animationend", () => el.classList.remove("shark-scrap-scan-highlight"), { once: true });
-        } catch {
-          // pojedyncza karta mogła zniknąć z DOM-u (np. re-render frameworka) — pomijamy ją
-        }
-      }, index * SCAN_HIGHLIGHT_STAGGER_MS);
-    });
+    el.classList.add("shark-scrap-scan-highlight");
+    el.addEventListener("animationend", () => el.classList.remove("shark-scrap-scan-highlight"), { once: true });
   } catch {
     // kosmetyka — nigdy nie blokuje właściwego skanu
   }
+}
+
+/**
+ * Podświetla WSZYSTKIE aktualnie dopasowane karty na żywej stronie, jedna po drugiej (używane
+ * tam, gdzie cała zawartość została podmieniona naraz, np. po kliknięciu "następna strona" w
+ * trybie click_next — każda karta na nowej stronie jest "nowa").
+ * @param {string} itemSelector
+ */
+function highlightAllVisibleItems(itemSelector) {
+  if (!itemSelector) return;
+  try {
+    const items = Array.from(document.querySelectorAll(itemSelector)).slice(0, SCAN_HIGHLIGHT_MAX_ITEMS);
+    items.forEach((el, index) => setTimeout(() => highlightScannedItem(el), index * SCAN_HIGHLIGHT_STAGGER_MS));
+  } catch {
+    // kosmetyka — nigdy nie blokuje właściwego skanu
+  }
+}
+
+/**
+ * Podświetla TYLKO nowo doładowane karty (od `previousCount` w kolejności DOM-u), jedna po
+ * drugiej — używane po "Załaduj więcej"/infinite scroll, gdzie karty się DOKŁADAJĄ, więc ponowne
+ * podświetlanie już widzianych kart byłoby mylące (i sprawiało wrażenie chaotycznego zamiatania
+ * całej siatki od nowa za każdym razem).
+ * @param {string} itemSelector
+ * @param {number} previousCount
+ */
+function highlightNewlyAppearedItems(itemSelector, previousCount) {
+  if (!itemSelector) return;
+  try {
+    const items = Array.from(document.querySelectorAll(itemSelector));
+    const freshItems = items.slice(previousCount, previousCount + SCAN_HIGHLIGHT_MAX_ITEMS);
+    freshItems.forEach((el, index) => setTimeout(() => highlightScannedItem(el), index * SCAN_HIGHLIGHT_STAGGER_MS));
+  } catch {
+    // kosmetyka — nigdy nie blokuje właściwego skanu
+  }
+}
+
+/**
+ * Buduje mapę adres->element DLA ŻYWEJ strony, żeby w kroku 3 (pobieranie każdego produktu po
+ * kolei, patrz scanCatalog) móc podświetlić dokładnie tę kartę w gridzie, której dane są właśnie
+ * ściągane — w rytmie REALNEGO tempa pobierania (REQUEST_DELAY_MS + czas fetcha), a nie osobnym,
+ * szybszym zegarem, który rozjeżdżał się z tym, co faktycznie się dzieje.
+ */
+function buildLiveItemUrlMap(itemSelector, urlSelector, urlAttribute, baseUrl, resolveUrl, priceLikeRe, pickBestProductLinkCandidate) {
+  const map = new Map();
+  if (!itemSelector) return map;
+  try {
+    const cards = Array.from(document.querySelectorAll(itemSelector));
+    for (const card of cards) {
+      const link = pickProductLinkFromCard(card, urlSelector, urlAttribute, priceLikeRe, pickBestProductLinkCandidate);
+      const abs = resolveUrl(link?.raw || link?.href, baseUrl);
+      if (abs && !map.has(abs)) map.set(abs, card);
+    }
+  } catch {
+    // brak mapy = po prostu żaden produkt się nie podświetli, skan i tak działa dalej
+  }
+  return map;
 }
 
 const HARD_PRODUCT_CAP = 2000;
@@ -730,7 +782,7 @@ async function autoClickThroughPages(pagination, listing, baseUrl, resolveUrl, p
 
     previousKey = newKey;
     allUrls = Array.from(new Set([...allUrls, ...extractCurrent()]));
-    highlightScannedItems(document, listing.item_selector);
+    highlightAllVisibleItems(listing.item_selector); // click_next PODMIENIA treść — cała nowa strona jest "nowa"
     await sleep(REQUEST_DELAY_MS);
   }
   return { clicks, collectedUrls: allUrls };
@@ -770,11 +822,12 @@ async function autoExpandLoadMore(pagination, itemSelector, productCap) {
     clicks += 1;
     sendProgress({ phase: "listing", pagesVisited: 1, pagesTotal: 1, productsFound: lastCount });
 
+    const countBeforeLoad = lastCount;
     await waitForCountIncrease(itemSelector, lastCount, LOAD_MORE_WAIT_TIMEOUT_MS);
     const newCount = safeCount(itemSelector);
     stableRounds = newCount > lastCount ? 0 : stableRounds + 1;
     lastCount = newCount;
-    highlightScannedItems(document, itemSelector);
+    highlightNewlyAppearedItems(itemSelector, countBeforeLoad); // load_more DOKŁADA karty — podświetlamy tylko nowe
     await sleep(REQUEST_DELAY_MS); // uprzejmość wobec serwera, tak jak przy fetchowaniu kolejnych stron
   }
   return { clicks, finalCount: lastCount };
@@ -810,13 +863,14 @@ async function autoScrollForMoreContent(itemSelector, productCap) {
     if (Number.isFinite(productCap) && productCap > 0 && lastCount >= productCap) break;
     sendProgress({ phase: "listing", pagesVisited: 1, pagesTotal: 1, productsFound: lastCount });
 
+    const countBeforeScroll = lastCount;
     window.scrollTo(0, document.body.scrollHeight);
     scrolls += 1;
     await waitForCountIncrease(itemSelector, lastCount, LOAD_MORE_WAIT_TIMEOUT_MS);
     const newCount = safeCount(itemSelector);
     stableRounds = newCount > lastCount ? 0 : stableRounds + 1;
     lastCount = newCount;
-    highlightScannedItems(document, itemSelector);
+    highlightNewlyAppearedItems(itemSelector, countBeforeScroll); // scroll DOKŁADA karty — podświetlamy tylko nowe
     await sleep(REQUEST_DELAY_MS);
   }
   return { scrolls, finalCount: lastCount };
@@ -957,7 +1011,9 @@ async function scanCatalog({ maxPages, maxProducts, useAI, apiKey, aiModel, aiPr
     }
 
     pagesVisited += 1;
-    highlightScannedItems(currentDoc, listing.item_selector);
+    // Podświetlenie kart NIE odbywa się tutaj (samo wykrycie listingu) — to leciało błyskawicznie,
+    // zanim cokolwiek realnie zostało pobrane. Właściwe podświetlanie, w rytmie faktycznego
+    // pobierania danych produktu po produkcie, jest niżej w kroku 3 (pętla po productUrls).
     const urlsOnPage = extractItemUrlsFromDoc(
       currentDoc,
       listing.item_selector,
@@ -1091,13 +1147,26 @@ async function scanCatalog({ maxPages, maxProducts, useAI, apiKey, aiModel, aiPr
     }
   }
 
-  // 3. Właściwe zbieranie danych z każdego produktu wg wykrytego field mapu.
+  // 3. Właściwe zbieranie danych z każdego produktu wg wykrytego field mapu. Podświetlamy tu
+  // dokładnie tę kartę w gridzie na żywej stronie, której dane są AKTUALNIE pobierane — tempo
+  // podświetlania = realne tempo skanu (REQUEST_DELAY_MS + czas fetcha), pojedynczo, produkt po
+  // produkcie, zamiast osobnego, szybszego zegara animacji rozjeżdżającego się z rzeczywistością.
+  const liveItemUrlMap = buildLiveItemUrlMap(
+    listing.item_selector,
+    listing.url_selector,
+    listing.url_attribute,
+    baseUrl,
+    resolveUrl,
+    PRICE_LIKE_RE,
+    pickBestProductLinkCandidate
+  );
   const products = [];
   const failedProductErrors = [];
   let done = 0;
   let iframeRenderedProducts = 0;
   for (const url of productUrls) {
     if (scanStopRequested) break;
+    highlightScannedItem(liveItemUrlMap.get(url));
     try {
       let doc;
       if (url === baseUrl) {

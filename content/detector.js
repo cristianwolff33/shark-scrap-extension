@@ -762,6 +762,11 @@ async function autoClickThroughPages(pagination, listing, baseUrl, resolveUrl, p
   let allUrls = extractCurrent();
   let previousKey = allUrls.join("|");
   let clicks = 0;
+  // User zgłosił, że skan przerzucał go na sam dół strony — scrollIntoView poniżej (potrzebny,
+  // żeby kliknięcie faktycznie trafiło w przycisk na stronach, które tego wymagają) przesuwał
+  // widok do przycisku "następna strona", który zwykle siedzi pod całą siatką produktów, czyli
+  // blisko dołu. Wracamy do pozycji sprzed skanu zaraz po kliknięciu.
+  const originalScrollY = window.scrollY;
 
   while (clicks < Math.max(maxPages - 1, 0) && allUrls.length < productCap && !scanStopRequested) {
     let btn;
@@ -774,6 +779,7 @@ async function autoClickThroughPages(pagination, listing, baseUrl, resolveUrl, p
 
     btn.scrollIntoView({ block: "center", behavior: "instant" });
     btn.click();
+    window.scrollTo(0, originalScrollY);
     clicks += 1;
     sendProgress({ phase: "listing", pagesVisited: clicks + 1, pagesTotal: maxPages, productsFound: allUrls.length });
 
@@ -806,6 +812,7 @@ async function autoExpandLoadMore(pagination, itemSelector, productCap) {
   let clicks = 0;
   let stableRounds = 0;
   let lastCount = safeCount(itemSelector);
+  const originalScrollY = window.scrollY; // patrz komentarz w autoClickThroughPages — wracamy tu z tego samego powodu
 
   while (clicks < LOAD_MORE_MAX_CLICKS && stableRounds < LOAD_MORE_STABLE_ROUNDS_LIMIT && !scanStopRequested) {
     if (Number.isFinite(productCap) && productCap > 0 && lastCount >= productCap) break;
@@ -819,6 +826,7 @@ async function autoExpandLoadMore(pagination, itemSelector, productCap) {
 
     btn.scrollIntoView({ block: "center", behavior: "instant" });
     btn.click();
+    window.scrollTo(0, originalScrollY);
     clicks += 1;
     sendProgress({ phase: "listing", pagesVisited: 1, pagesTotal: 1, productsFound: lastCount });
 

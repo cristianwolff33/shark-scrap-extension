@@ -847,11 +847,18 @@ const INFINITE_SCROLL_PROBE_TIMEOUT_MS = 1500; // krótka, tania sonda — czy s
  */
 async function autoScrollForMoreContent(itemSelector, productCap) {
   if (!itemSelector) return { scrolls: 0, finalCount: 0 };
+  // Sonda przewija na sam dół, żeby sprawdzić, czy strona doładowuje więcej kart — user zgłosił,
+  // że po kliknięciu "Skanuj sklep" strona ZAWSZE skacze na dół, nawet gdy to zwykła, skończona
+  // lista (najczęstszy przypadek). Zapamiętujemy pozycję sprzed sondy i wracamy do niej, gdy
+  // scroll niczego nie doładował — a także po zakończeniu realnego doładowywania, bo user chciał
+  // tylko WYNIK skanu, a nie zostać przewinięty gdzieś indziej niż zaczynał.
+  const originalScrollY = window.scrollY;
   let lastCount = safeCount(itemSelector);
 
   window.scrollTo(0, document.body.scrollHeight);
   await waitForCountIncrease(itemSelector, lastCount, INFINITE_SCROLL_PROBE_TIMEOUT_MS);
   if (safeCount(itemSelector) <= lastCount) {
+    window.scrollTo(0, originalScrollY);
     return { scrolls: 0, finalCount: lastCount }; // scroll nic nie zmienił — zwykła, skończona lista
   }
 
@@ -873,6 +880,7 @@ async function autoScrollForMoreContent(itemSelector, productCap) {
     highlightNewlyAppearedItems(itemSelector, countBeforeScroll); // scroll DOKŁADA karty — podświetlamy tylko nowe
     await sleep(REQUEST_DELAY_MS);
   }
+  window.scrollTo(0, originalScrollY);
   return { scrolls, finalCount: lastCount };
 }
 

@@ -151,10 +151,29 @@ async function extractFieldsByMapFromDoc(doc, pageUrl, fieldMap) {
 }
 
 /** Grupuje elementy strony wg sygnatury (tag + stabilna klasa, albo tag + atrybut testowy) i szuka powtarzalnych "kart produktu". */
+/**
+ * Sprawdza, czy element (albo bliski przodek, do kilku poziomów w górę) ma klasę CSS typową dla
+ * karuzeli/slidera JS albo widgetu rekomendacji ("Bestsellery", "Może Cię zainteresować" itp.) —
+ * patrz CAROUSEL_OR_RECOMMENDATION_CLASS_RE w lib/listing.js. Realny przypadek zgłoszony przez
+ * usera: karuzela bestsellerów NAD właściwą listą produktów miała markup łudząco podobny do
+ * prawdziwych kart (cena+zdjęcie+link), więc trafiała do tej samej grupy kandydatów.
+ * @param {Element} el
+ * @param {RegExp} carouselClassRe
+ */
+function looksLikeCarouselOrRecommendationWidget(el, carouselClassRe) {
+  let node = el;
+  for (let depth = 0; node && depth < 6; depth += 1) {
+    const className = typeof node.className === "string" ? node.className : "";
+    if (className && carouselClassRe.test(className)) return true;
+    node = node.parentElement;
+  }
+  return false;
+}
+
 async function detectListingFromDoc(doc, pageUrl = location.href) {
   const [
     { pickStableClass, pickTestId },
-    { groupSignature, groupSignatureForAttr, pickBestGroup, pickBestProductLinkCandidate, PRICE_LIKE_RE },
+    { groupSignature, groupSignatureForAttr, pickBestGroup, pickBestProductLinkCandidate, PRICE_LIKE_RE, CAROUSEL_OR_RECOMMENDATION_CLASS_RE },
   ] = await Promise.all([loadLib("selectors.js"), loadLib("listing.js")]);
 
   /** @type {Map<string, {selector:string, els:Element[]}>} */
@@ -185,7 +204,12 @@ async function detectListingFromDoc(doc, pageUrl = location.href) {
       const withImage = g.els.filter((el) => el.querySelector("img")).length;
       const withPriceLike = g.els.filter((el) => PRICE_LIKE_RE.test(el.textContent || "")).length;
       const avgTextLength = g.els.reduce((sum, el) => sum + (el.textContent || "").trim().length, 0) / g.els.length;
-      return { selector: g.selector, count: g.els.length, withLink, withImage, withPriceLike, avgTextLength, _els: g.els };
+      // Odrzucamy grupę całościowo, gdy WIĘKSZOŚĆ jej elementów siedzi w karuzeli/widgecie
+      // rekomendacji — pojedynczy fałszywy trafienie (np. przypadkowa klasa) nie powinno zepsuć
+      // dobrej grupy, ale gdy to naprawdę karuzela, praktycznie wszystkie elementy będą oznaczone.
+      const inCarouselCount = g.els.filter((el) => looksLikeCarouselOrRecommendationWidget(el, CAROUSEL_OR_RECOMMENDATION_CLASS_RE)).length;
+      const looksLikeCarousel = inCarouselCount / g.els.length > 0.5;
+      return { selector: g.selector, count: g.els.length, withLink, withImage, withPriceLike, avgTextLength, looksLikeCarousel, _els: g.els };
     });
 
   const best = pickBestGroup(descriptors);
@@ -301,7 +325,7 @@ function pickProductLinkFromCard(card, urlSelector, urlAttribute, priceLikeRe, p
   return pickBestProductLinkCandidate(candidates);
 }
 
-function extractItemUrlsFromDoc(doc, itemSelector, urlSelector, urlAttribute, baseUrl, resolveUrl, priceLikeRe, pickBestProductLinkCandidate) {
+function extractItemUrlsFromDoc(doc, itemSelector, urlSelector, urlAttribute, baseUrl, resolveUrl, priceLikeRe, pickBestProductLinkCandidate, carouselClassRe) {
   if (!itemSelector) return [];
   let cards;
   try {
@@ -313,6 +337,12 @@ function extractItemUrlsFromDoc(doc, itemSelector, urlSelector, urlAttribute, ba
   }
   const urls = [];
   for (const card of cards) {
+    // Karty z karuzeli "Bestsellery"/"Może Cię zainteresować" bywają zbudowane z TEGO SAMEGO
+    // komponentu co prawdziwa karta produktu (współdzielony CSS/komponent), więc pasują do tego
+    // samego item_selector — trzeba je odsiać tutaj, przy każdej karcie z osobna, a nie tylko na
+    // etapie wyboru grupy w detectListingFromDoc (tam liczy się WIĘKSZOŚĆ grupy, nie pojedyncza
+    // karta, więc mieszana grupa mogłaby przejść, ale pojedyncze karty z karuzeli i tak by wyciekły).
+    if (carouselClassRe && looksLikeCarouselOrRecommendationWidget(card, carouselClassRe)) continue;
     const link = pickProductLinkFromCard(card, urlSelector, urlAttribute, priceLikeRe, pickBestProductLinkCandidate);
     const abs = resolveUrl(link?.raw || link?.href, baseUrl);
     if (abs) urls.push(abs);
@@ -320,8 +350,10 @@ function extractItemUrlsFromDoc(doc, itemSelector, urlSelector, urlAttribute, ba
   return urls;
 }
 
-function extractLikelyProductUrlsFromDoc(doc, baseUrl, resolveUrl, priceLikeRe, scoreProductLinkCandidate) {
-  const anchors = Array.from(doc.querySelectorAll("a[href]"));
+function extractLikelyProductUrlsFromDoc(doc, baseUrl, resolveUrl, priceLikeRe, scoreProductLinkCandidate, carouselClassRe) {
+  const anchors = Array.from(doc.querySelectorAll("a[href]")).filter(
+    (el) => !(carouselClassRe && looksLikeCarouselOrRecommendationWidget(el, carouselClassRe))
+  );
   const candidates = anchors.map((el) => {
     let node = el.parentElement;
     let hasPriceNearby = priceLikeRe.test(el.textContent || "");
@@ -752,12 +784,22 @@ function waitForUrlSetChange(extractUrls, previousKey, timeoutMs) {
  * porównujemy sam ZESTAW zebranych URL-i, nie jego rozmiar). Działa tylko na żywej stronie,
  * z tych samych powodów co autoExpandLoadMore.
  */
-async function autoClickThroughPages(pagination, listing, baseUrl, resolveUrl, priceLikeRe, pickBestProductLinkCandidate, productCap, maxPages) {
+async function autoClickThroughPages(pagination, listing, baseUrl, resolveUrl, priceLikeRe, pickBestProductLinkCandidate, productCap, maxPages, carouselClassRe) {
   if (!pagination || pagination.mode !== "click_next" || !pagination.next_selector) {
     return { clicks: 0, collectedUrls: [] };
   }
   const extractCurrent = () =>
-    extractItemUrlsFromDoc(document, listing.item_selector, listing.url_selector, listing.url_attribute, baseUrl, resolveUrl, priceLikeRe, pickBestProductLinkCandidate);
+    extractItemUrlsFromDoc(
+      document,
+      listing.item_selector,
+      listing.url_selector,
+      listing.url_attribute,
+      baseUrl,
+      resolveUrl,
+      priceLikeRe,
+      pickBestProductLinkCandidate,
+      carouselClassRe
+    );
 
   let allUrls = extractCurrent();
   let previousKey = allUrls.join("|");
@@ -920,7 +962,8 @@ async function suggestMissingFieldsWithAi({ apiKey, aiModel, aiProvider, cloudAi
 async function scanCatalog({ maxPages, maxProducts, useAI, apiKey, aiModel, aiProvider, cloudAi } = {}) {
   scanStopRequested = false;
   const { resolveUrl, normalizeCrawlUrl, dedupe, capArray, guessAdapterMode, isAutoFollowablePagination, pickBestSample } = await loadLib("crawler.js");
-  const { PRICE_LIKE_RE, pickBestProductLinkCandidate, scoreProductLinkCandidate, isLikelyPaginationLinkCandidate } = await loadLib("listing.js");
+  const { PRICE_LIKE_RE, pickBestProductLinkCandidate, scoreProductLinkCandidate, isLikelyPaginationLinkCandidate, CAROUSEL_OR_RECOMMENDATION_CLASS_RE } =
+    await loadLib("listing.js");
 
   const baseUrl = location.href;
   const listing = await detectListing();
@@ -970,7 +1013,8 @@ async function scanCatalog({ maxPages, maxProducts, useAI, apiKey, aiModel, aiPr
       PRICE_LIKE_RE,
       pickBestProductLinkCandidate,
       productCap,
-      effectiveMaxPages
+      effectiveMaxPages,
+      CAROUSEL_OR_RECOMMENDATION_CLASS_RE
     );
     preCollectedProductUrls = clickResult.collectedUrls;
     clickThroughPages = clickResult.clicks;
@@ -1038,7 +1082,8 @@ async function scanCatalog({ maxPages, maxProducts, useAI, apiKey, aiModel, aiPr
       currentUrl,
       resolveUrl,
       PRICE_LIKE_RE,
-      pickBestProductLinkCandidate
+      pickBestProductLinkCandidate,
+      CAROUSEL_OR_RECOMMENDATION_CLASS_RE
     );
     // Fallback (skan WSZYSTKICH linków na stronie wg score'u) używamy TYLKO, gdy strukturalna
     // detekcja kart (item_selector) nic nie znalazła na tej stronie. Wcześniej dokładaliśmy go
@@ -1048,7 +1093,7 @@ async function scanCatalog({ maxPages, maxProducts, useAI, apiKey, aiModel, aiPr
     const fallbackUrlsOnPage =
       urlsOnPage.length > 0
         ? []
-        : extractLikelyProductUrlsFromDoc(currentDoc, currentUrl, resolveUrl, PRICE_LIKE_RE, scoreProductLinkCandidate);
+        : extractLikelyProductUrlsFromDoc(currentDoc, currentUrl, resolveUrl, PRICE_LIKE_RE, scoreProductLinkCandidate, CAROUSEL_OR_RECOMMENDATION_CLASS_RE);
     productUrls = dedupe(
       [...productUrls, ...urlsOnPage, ...fallbackUrlsOnPage]
         .map(normalizeCrawlUrl)

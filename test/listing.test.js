@@ -12,6 +12,7 @@ import {
   scoreProductLinkCandidate,
   isNavigableHref,
   PRICE_LIKE_RE,
+  CAROUSEL_OR_RECOMMENDATION_CLASS_RE,
 } from "../lib/listing.js";
 
 test("scoreGroupDescriptor odrzuca grupy mniejsze niż 3 elementy", () => {
@@ -51,6 +52,53 @@ test("scoreGroupDescriptor: liczba elementów (count) nie dominuje już wyniku s
   const brandCarousel = { count: 44, withLink: 44, withImage: 44, withPriceLike: 0, avgTextLength: 0 };
   const smallProductGrid = { count: 8, withLink: 8, withImage: 8, withPriceLike: 8, avgTextLength: 188 };
   assert.ok(scoreGroupDescriptor(smallProductGrid) > scoreGroupDescriptor(brandCarousel));
+});
+
+test("scoreGroupDescriptor odrzuca grupę oznaczoną jako karuzela/widget rekomendacji, NAWET z idealnym stosunkiem ceny/zdjęcia", () => {
+  // Realny przypadek zgłoszony przez usera: karuzela "Bestsellery" nad właściwą listą produktów
+  // ma markup łudząco podobny do prawdziwych kart (cena+zdjęcie+link) — same liczby nie
+  // odróżniłyby jej od prawdziwej siatki, stąd osobna flaga looksLikeCarousel (ustawiana przez
+  // content/detector.js na podstawie klasy karuzeli/widgetu na elemencie lub bliskim przodku).
+  const perfectButCarousel = { count: 10, withLink: 10, withImage: 10, withPriceLike: 10, avgTextLength: 100, looksLikeCarousel: true };
+  assert.equal(scoreGroupDescriptor(perfectButCarousel), -Infinity);
+});
+
+test("pickBestGroup: prawdziwa siatka produktów wygrywa z karuzelą bestsellerów o identycznym markupie", () => {
+  const groups = [
+    { selector: "div.product-card", count: 10, withLink: 10, withImage: 10, withPriceLike: 10, avgTextLength: 100, looksLikeCarousel: true },
+    { selector: "div.category-item", count: 8, withLink: 8, withImage: 8, withPriceLike: 8, avgTextLength: 90, looksLikeCarousel: false },
+  ];
+  const best = pickBestGroup(groups);
+  assert.equal(best.selector, "div.category-item");
+});
+
+test("CAROUSEL_OR_RECOMMENDATION_CLASS_RE rozpoznaje popularne biblioteki karuzeli i nazwy widgetów rekomendacji (PL/EN)", () => {
+  const shouldMatch = [
+    "swiper-wrapper",
+    "slick-slider",
+    "owl-carousel",
+    "splide__track",
+    "product-carousel",
+    "bestseller-list",
+    "related-products",
+    "you-may-also-like",
+    "recently-viewed-items",
+    "polecane-produkty",
+    "bestsellery-grid",
+    "rekomendowane-dla-ciebie",
+    "podobne-produkty",
+    "klienci-kupili-rowniez",
+  ];
+  for (const className of shouldMatch) {
+    assert.ok(CAROUSEL_OR_RECOMMENDATION_CLASS_RE.test(className), `powinno dopasować: ${className}`);
+  }
+});
+
+test("CAROUSEL_OR_RECOMMENDATION_CLASS_RE NIE dopasowuje zwykłych nazw kontenera listingu (żeby nie odrzucać prawdziwej siatki produktów)", () => {
+  const shouldNotMatch = ["product-grid", "product-list", "category-products", "catalog-items", "products", "kw-product"];
+  for (const className of shouldNotMatch) {
+    assert.equal(CAROUSEL_OR_RECOMMENDATION_CLASS_RE.test(className), false, `nie powinno dopasować: ${className}`);
+  }
 });
 
 test("pickNextLinkCandidate preferuje rel=next", () => {

@@ -763,7 +763,11 @@ function extensionFromUrl(url, contentType) {
   return "jpg";
 }
 
-const IMAGE_EXPORT_CAP = 500;
+// User zgłosił, że 500 obcinało realne katalogi (setki produktów × kilka zdjęć każdy = limit
+// osiągany, zanim dotarło się do wszystkich produktów). To wciąż limit BEZPIECZEŃSTWA, nie cel —
+// podniesiony rząd wielkości wyżej, żeby pasował do HARD_PRODUCT_CAP (2000 produktów) w
+// content/detector.js zamiast ucinać już przy pierwszych ~100 produktach ze zdjęciami.
+const IMAGE_EXPORT_CAP = 5000;
 const IMAGE_FETCH_CONCURRENCY = 6; // pobieranie równoległe zamiast pojedynczo jedno-po-drugim — nadal ograniczone, żeby nie zasypać CDN sklepu setkami jednoczesnych połączeń
 
 /** Uruchamia `worker` na wszystkich `items`, max `limit` naraz — proste pulowanie równoległości bez zależności. */

@@ -964,6 +964,7 @@ async function scanCatalog({ maxPages, maxProducts, useAI, apiKey, aiModel, aiPr
   const { resolveUrl, normalizeCrawlUrl, dedupe, capArray, guessAdapterMode, isAutoFollowablePagination, pickBestSample } = await loadLib("crawler.js");
   const { PRICE_LIKE_RE, pickBestProductLinkCandidate, scoreProductLinkCandidate, isLikelyPaginationLinkCandidate, CAROUSEL_OR_RECOMMENDATION_CLASS_RE } =
     await loadLib("listing.js");
+  const { isProductUnavailable } = await loadLib("fields.js");
 
   const baseUrl = location.href;
   const listing = await detectListing();
@@ -973,6 +974,17 @@ async function scanCatalog({ maxPages, maxProducts, useAI, apiKey, aiModel, aiPr
     // Brak wykrytej listy na bieżącej stronie — traktujemy ją jako pojedynczy produkt (fallback),
     // żeby przycisk "Skanuj sklep" zawsze coś sensownego zrobił, nawet z karty produktu.
     const product = await detectProduct();
+    if (isProductUnavailable(product.fields)) {
+      return {
+        mode: "single_product",
+        listing,
+        pagination,
+        fieldMap: product.fields,
+        products: [],
+        pagesVisited: 1,
+        warnings: ["Ten produkt jest niedostępny (status \"Niedostępny\"/\"Wyprzedany\"/\"Wycofany\" itp.) — pominięty, brak wyników."],
+      };
+    }
     sendProduct({ url: product.url, fields: product.fields, ok: true });
     return {
       mode: "single_product",
@@ -1225,6 +1237,7 @@ async function scanCatalog({ maxPages, maxProducts, useAI, apiKey, aiModel, aiPr
   const failedProductErrors = [];
   let done = 0;
   let iframeRenderedProducts = 0;
+  let skippedUnavailable = 0;
   for (const url of productUrls) {
     if (scanStopRequested) break;
     highlightScannedItem(liveItemUrlMap.get(url));
@@ -1242,9 +1255,16 @@ async function scanCatalog({ maxPages, maxProducts, useAI, apiKey, aiModel, aiPr
       // produktu. Świeża detekcja strony nadal wygrywa, bo zwykle ma JSON-LD/meta dla tej karty.
       const mappedFields = await extractFieldsByMapFromDoc(doc, url, fieldMap);
       const merged = { ...mappedFields, ...detected.fields };
-      const record = { url, fields: merged, ok: true };
-      products.push(record);
-      sendProduct(record);
+      if (isProductUnavailable(merged)) {
+        // User chciał POMIJAĆ niedostępne produkty, nie tylko oznaczać — nie trafiają do
+        // wyników ani do żadnego eksportu. Progress/highlight i tak już poleciały wyżej, bo
+        // trzeba było odwiedzić stronę produktu, żeby w ogóle poznać jego dostępność.
+        skippedUnavailable += 1;
+      } else {
+        const record = { url, fields: merged, ok: true };
+        products.push(record);
+        sendProduct(record);
+      }
     } catch (err) {
       const record = { url, fields: {}, ok: false, error: String(err.message || err) };
       products.push(record);
@@ -1261,6 +1281,9 @@ async function scanCatalog({ maxPages, maxProducts, useAI, apiKey, aiModel, aiPr
   }
   if (iframeRenderedProducts > 0) {
     warnings.push(`${iframeRenderedProducts}/${productUrls.length} stron produktów wymagało dorenderowania w ukrytym iframe (strony nie działają bez JS-a) — skan mógł być przez to wolniejszy.`);
+  }
+  if (skippedUnavailable > 0) {
+    warnings.push(`Pominięto ${skippedUnavailable} niedostępnych produktów (status "Niedostępny"/"Wyprzedany"/"Wycofany" itp.) — nie trafiły do wyników.`);
   }
 
   return {

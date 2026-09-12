@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mergeFieldSources, missingFields, pickRichestImagesField } from "../lib/fields.js";
+import { mergeFieldSources, missingFields, pickRichestImagesField, isProductUnavailable } from "../lib/fields.js";
 
 test("mergeFieldSources: wyższy priorytet nadpisuje niższy", () => {
   const jsonld = { price: { source: "jsonld", value: "100" } };
@@ -52,4 +52,34 @@ test("pickRichestImagesField pomija brakujące/puste kandydatury i zwraca null g
   assert.equal(pickRichestImagesField([]), null);
   const only = { source: "dom", values: ["x.jpg"] };
   assert.equal(pickRichestImagesField([undefined, only, undefined]), only);
+});
+
+test("isProductUnavailable rozpoznaje zhumanizowane statusy ze schema.org (patrz humanizeAvailability w lib/jsonld.js)", () => {
+  assert.equal(isProductUnavailable({ availability: { value: "Niedostępny" } }), true);
+  assert.equal(isProductUnavailable({ availability: { value: "Wyprzedany" } }), true);
+  assert.equal(isProductUnavailable({ availability: { value: "Wycofany" } }), true);
+});
+
+test("isProductUnavailable rozpoznaje surowy tekst wykryty w DOM (.stock-status itp., PL i EN)", () => {
+  assert.equal(isProductUnavailable({ availability: { value: "Produkt niedostępny" } }), true);
+  assert.equal(isProductUnavailable({ availability: { value: "Brak w magazynie" } }), true);
+  assert.equal(isProductUnavailable({ availability: { value: "Chwilowo brak towaru" } }), true);
+  assert.equal(isProductUnavailable({ availability: { value: "Out of stock" } }), true);
+  assert.equal(isProductUnavailable({ availability: { value: "SOLD OUT" } }), true);
+  assert.equal(isProductUnavailable({ availability: { value: "This item is unavailable" } }), true);
+});
+
+test("isProductUnavailable NIE odrzuca produktów wciąż kupowalnych (ograniczona dostępność, na zamówienie, przedsprzedaż)", () => {
+  assert.equal(isProductUnavailable({ availability: { value: "Dostępny" } }), false);
+  assert.equal(isProductUnavailable({ availability: { value: "Ograniczona dostępność" } }), false);
+  assert.equal(isProductUnavailable({ availability: { value: "Na zamówienie" } }), false);
+  assert.equal(isProductUnavailable({ availability: { value: "Przedsprzedaż" } }), false);
+  assert.equal(isProductUnavailable({ availability: { value: "In stock" } }), false);
+});
+
+test("isProductUnavailable domyślnie NIE pomija, gdy brak jakiejkolwiek informacji o dostępności", () => {
+  assert.equal(isProductUnavailable({}), false);
+  assert.equal(isProductUnavailable({ availability: undefined }), false);
+  assert.equal(isProductUnavailable({ availability: { value: "" } }), false);
+  assert.equal(isProductUnavailable(undefined), false);
 });

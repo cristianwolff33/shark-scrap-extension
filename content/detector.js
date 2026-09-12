@@ -250,14 +250,28 @@ async function detectPaginationFromDoc(doc) {
   const { pickNextLinkCandidate, pickLoadMoreCandidate, isNavigableHref } = await loadLib("listing.js");
   const { generateSelector } = await loadLib("selectors.js");
 
-  const links = Array.from(doc.querySelectorAll("a")).map((a) => ({
-    el: a,
-    selector: "",
-    text: (a.textContent || "").trim(),
-    rel: a.getAttribute("rel") || "",
-    ariaLabel: a.getAttribute("aria-label") || "",
-    hasHref: !!a.getAttribute("href"),
-  }));
+  // Prawdziwy link "następna strona"/przycisk "załaduj więcej" praktycznie NIGDY nie siedzi w
+  // stopce ani nagłówku strony — a dokładnie tam bywają linki tekstowo pasujące do naszych
+  // wzorców (np. stopka Rossmanna ma link "Zobacz więcej" prowadzący do strony pomocy, zupełnie
+  // niezwiązany z listingiem produktów). Bez tego filtra wtyczka "klikała" taki link na żywej
+  // stronie i wyrzucała usera z listingu produktów gdzie indziej — realny przypadek zgłoszony i
+  // zweryfikowany live na rossmann.pl (kategorie bez numerowanej paginacji, gdzie nie było
+  // prawdziwego kandydata "next", więc wygrywał ten fałszywy trop).
+  // CELOWO bez "nav" — prawdziwa paginacja jest bardzo często (i poprawnie semantycznie)
+  // owinięta we <nav aria-label="pagination">, co też zweryfikowano live na tym samym
+  // rossmann.pl: wykluczenie "nav" zgubiłoby prawdziwy link "Page=2".
+  const isInPageChrome = (el) => !!el.closest?.("header, footer");
+
+  const links = Array.from(doc.querySelectorAll("a"))
+    .filter((a) => !isInPageChrome(a))
+    .map((a) => ({
+      el: a,
+      selector: "",
+      text: (a.textContent || "").trim(),
+      rel: a.getAttribute("rel") || "",
+      ariaLabel: a.getAttribute("aria-label") || "",
+      hasHref: !!a.getAttribute("href"),
+    }));
   // Sporo CMS-ów (WordPress i inne) emituje SEO-owy <link rel="next" href="..."> w <head>,
   // niezależnie od tego, czy w <body> w ogóle jest widoczny link "następna strona" — to bardzo
   // rzetelny sygnał, kompletnie pomijany wcześniej, bo skanowaliśmy tylko <a> w treści strony.
@@ -265,12 +279,14 @@ async function detectPaginationFromDoc(doc) {
   if (headNext && headNext.getAttribute("href")) {
     links.unshift({ el: headNext, selector: "", text: "", rel: "next", ariaLabel: "", hasHref: true });
   }
-  const buttons = Array.from(doc.querySelectorAll("button, a")).map((el) => ({
-    el,
-    text: (el.textContent || "").trim(),
-    ariaLabel: el.getAttribute("aria-label") || "",
-    disabled: isDisabledCandidateEl(el),
-  }));
+  const buttons = Array.from(doc.querySelectorAll("button, a"))
+    .filter((el) => !isInPageChrome(el))
+    .map((el) => ({
+      el,
+      text: (el.textContent || "").trim(),
+      ariaLabel: el.getAttribute("aria-label") || "",
+      disabled: isDisabledCandidateEl(el),
+    }));
 
   const next = pickNextLinkCandidate(links);
   const loadMore = pickLoadMoreCandidate(buttons);

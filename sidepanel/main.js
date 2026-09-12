@@ -615,14 +615,23 @@ const BLOB_URL_FALLBACK_REVOKE_MS = 60_000; // zabezpieczenie, gdyby chrome.down
  * antywirus skanujący każdy pobrany plik — potrafił upłynąć ZANIM Chrome zdążył faktycznie
  * odczytać blob: URL, przez co pobieranie lądowało pod losowo wygenerowaną nazwą zamiast
  * właściwej (dokładnie ten objaw, który user zgłosił na innym komputerze).
+ *
+ * Pole `filename` w chrome.downloads.download() okazało się NADAL zawodne dla adresów blob: u
+ * części userów (uporczywie zgłaszany "dziwny ciąg znaków" = UUID samego bloba jako nazwa pliku,
+ * mimo powyższego fixu i mimo jawnie podanego `filename`) — to znany, udokumentowany problem
+ * rozszerzeń Chrome. Dlatego DODATKOWO kodujemy zamierzoną nazwę we FRAGMENCIE (#) adresu blob:
+ * — background.js ma listener na chrome.downloads.onDeterminingFilename, który czyta ten
+ * fragment i WYMUSZA właściwą nazwę niezależnie od tego, czy samo pole `filename` zadziałało.
+ * Fragment nie zmienia treści zwracanej przez blob:, więc pobierane bajty są te same.
  * @param {Blob} blob
  * @param {string} filename - ścieżka względna, patrz writeOutput/onExportImages
  */
 async function downloadBlobViaChrome(blob, filename) {
   const url = URL.createObjectURL(blob);
+  const urlWithFilenameHint = `${url}#${encodeURIComponent(filename)}`;
   let downloadId;
   try {
-    downloadId = await chrome.downloads.download({ url, filename, saveAs: false });
+    downloadId = await chrome.downloads.download({ url: urlWithFilenameHint, filename, saveAs: false });
   } catch (err) {
     URL.revokeObjectURL(url);
     throw err;

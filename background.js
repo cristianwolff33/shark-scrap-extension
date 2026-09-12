@@ -6,10 +6,30 @@
  */
 
 chrome.runtime.onInstalled.addListener(() => {
-  chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch((err) => {
+  chrome.sidePanel?.setPanelBehavior?.({ openPanelOnActionClick: true })?.catch((err) => {
     console.error("[scraper-ext] setPanelBehavior failed:", err);
   });
 });
+
+/**
+ * Zapasowy, JAWNY sposób otwierania panelu po kliknięciu ikonki — niezależny od setPanelBehavior
+ * wyżej. User zgłosił, że w świeżo zainstalowanej Operze (dopiero co dodała wsparcie dla
+ * chrome.sidePanel, wrzesień 2026) wtyczka ładuje się poprawnie (widoczna w opera://extensions,
+ * bez błędów, ikonka przypięta), ale kliknięcie ikonki nic nie robi — typowy objaw, gdy
+ * przeglądarka rozpoznaje `side_panel` w manifeście, ale nie honoruje deklaratywnego
+ * setPanelBehavior({openPanelOnActionClick:true}) tak jak Chrome. sidePanel.open() jest
+ * bezpieczne do wywołania nawet w Chrome, gdzie panel i tak już się otworzy przez
+ * setPanelBehavior — nie koliduje z powyższym mechanizmem, tylko dubluje go na wszelki wypadek.
+ * MUSI być wywołane synchronicznie w handlerze kliknięcia (bez żadnego await przed nim) — tak
+ * samo jak showDirectoryPicker, sidePanel.open() wymaga aktywnego gestu usera.
+ */
+if (chrome.sidePanel?.open) {
+  chrome.action.onClicked.addListener((tab) => {
+    chrome.sidePanel.open({ windowId: tab.windowId }).catch((err) => {
+      console.error("[scraper-ext] sidePanel.open failed:", err);
+    });
+  });
+}
 
 /**
  * User zgłaszał uporczywie, że pliki (CSV/XLSX/JSON/ZIP) lądowały pod losowym ciągiem znaków

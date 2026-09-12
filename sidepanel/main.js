@@ -900,6 +900,16 @@ async function fetchProductImages(onProgress, { forceZipEntries = false } = {}) 
 }
 
 async function onExportImages() {
+  try {
+    // Patrz komentarz w onDownloadFull — showDirectoryPicker musi polecieć, zanim ensureScanResults
+    // (potencjalnie cały skan katalogu) zdąży zjeść okno aktywacji usera z kliknięcia.
+    if (fsdir.isSupported() && !state.outputDirHandle) {
+      await ensureOutputDir();
+    }
+  } catch (err) {
+    toastError(err); // user anulował wybór folderu (AbortError) albo inny błąd — kończymy tutaj
+    return;
+  }
   if (!(await ensureScanResults())) return;
   readFormIntoConfig();
   const progressEl = el("images-export-progress");
@@ -965,6 +975,18 @@ async function onDownloadFull() {
   // state.config w połowie eksportu.
   state.downloadingFull = true;
   try {
+    // showDirectoryPicker WYMAGA aktywnej "aktywacji usera" z kliknięcia — Chrome cofa to okno po
+    // krótkiej chwili. Wcześniej pytaliśmy o folder na SAMYM KOŃCU (dopiero przed zapisem ZIP-a,
+    // wewnątrz fetchProductImages/ensureOutputDir), czyli PO ewentualnym skanowaniu całego
+    // katalogu, generowaniu wierszy i pobraniu WSZYSTKICH zdjęć — dla realnych katalogów to trwa
+    // długo, więc aktywacja usera zdążała wygasnąć i showDirectoryPicker rzucał "Failed to execute
+    // 'showDirectoryPicker' on 'Window': must be handling a user gesture" (dokładnie zgłoszony
+    // błąd). Pytamy więc o folder JAKO PIERWSZE, zanim jakikolwiek dłuższy await zdąży zjeść to
+    // okno; jeśli folder już wybrany wcześniej w tej sesji, ensureOutputDir nic nie pyta.
+    if (fsdir.isSupported() && !state.outputDirHandle) {
+      await ensureOutputDir();
+    }
+
     if (!(await ensureScanResults())) return;
     readFormIntoConfig();
 

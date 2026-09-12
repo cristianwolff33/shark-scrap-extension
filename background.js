@@ -12,22 +12,59 @@ chrome.runtime.onInstalled.addListener(() => {
 });
 
 /**
- * Zapasowy, JAWNY sposób otwierania panelu po kliknięciu ikonki — niezależny od setPanelBehavior
- * wyżej. User zgłosił, że w świeżo zainstalowanej Operze (dopiero co dodała wsparcie dla
- * chrome.sidePanel, wrzesień 2026) wtyczka ładuje się poprawnie (widoczna w opera://extensions,
- * bez błędów, ikonka przypięta), ale kliknięcie ikonki nic nie robi — typowy objaw, gdy
- * przeglądarka rozpoznaje `side_panel` w manifeście, ale nie honoruje deklaratywnego
- * setPanelBehavior({openPanelOnActionClick:true}) tak jak Chrome. sidePanel.open() jest
- * bezpieczne do wywołania nawet w Chrome, gdzie panel i tak już się otworzy przez
- * setPanelBehavior — nie koliduje z powyższym mechanizmem, tylko dubluje go na wszelki wypadek.
- * MUSI być wywołane synchronicznie w handlerze kliknięcia (bez żadnego await przed nim) — tak
- * samo jak showDirectoryPicker, sidePanel.open() wymaga aktywnego gestu usera.
+ * Zweryfikowane bezpośrednio w konsoli service workera usera: `typeof chrome.sidePanel` to
+ * dosłownie "undefined" w jego Operze — mimo że Opera OGŁOSIŁA wsparcie dla chrome.sidePanel
+ * (wersja 135, wrzesień 2026), to konkretna instalacja go nie ma (stopniowe wdrożenie funkcji
+ * albo starsza wersja niż zakładał user). Żaden kod JS nie przywoła nieistniejącego API — jedyne
+ * wyjście to NIE polegać na side panelu wcale, gdy go brak, tylko otworzyć TEN SAM plik
+ * sidepanel.html jako osobne, pływające okno rozszerzenia (chrome.windows.create) zamiast
+ * dokowanego panelu. main.js nie musi o tym nic wiedzieć poza jednym wyjątkiem — patrz
+ * isFloatingWindowMode / getTrackedWindowId w sidepanel/main.js, bo "okno, w którym siedzi panel"
+ * przestaje być tym samym oknem co przeglądana strona sklepu.
  */
+let popupWindowId = null;
+
+async function openAsFloatingWindow() {
+  if (popupWindowId !== null) {
+    try {
+      await chrome.windows.update(popupWindowId, { focused: true });
+      return;
+    } catch {
+      popupWindowId = null; // okno już nie istnieje (user je zamknął) — otwieramy nowe niżej
+    }
+  }
+  const win = await chrome.windows.create({
+    url: chrome.runtime.getURL("sidepanel/sidepanel.html"),
+    type: "popup",
+    width: 420,
+    height: 720,
+  });
+  popupWindowId = win.id;
+}
+
+chrome.windows.onRemoved.addListener((windowId) => {
+  if (windowId === popupWindowId) popupWindowId = null;
+});
+
 if (chrome.sidePanel?.open) {
+  /**
+   * JAWNY sposób otwierania panelu po kliknięciu ikonki — niezależny od setPanelBehavior wyżej,
+   * na wypadek przeglądarki, która ma chrome.sidePanel, ale nie honoruje deklaratywnego
+   * setPanelBehavior({openPanelOnActionClick:true}) tak jak Chrome. sidePanel.open() jest
+   * bezpieczne do wywołania nawet w Chrome, gdzie panel i tak już się otworzy przez
+   * setPanelBehavior — nie koliduje z powyższym mechanizmem, tylko dubluje go na wszelki wypadek.
+   * MUSI być wywołane synchronicznie w handlerze kliknięcia (bez żadnego await przed nim) — tak
+   * samo jak showDirectoryPicker, sidePanel.open() wymaga aktywnego gestu usera.
+   */
   chrome.action.onClicked.addListener((tab) => {
     chrome.sidePanel.open({ windowId: tab.windowId }).catch((err) => {
       console.error("[scraper-ext] sidePanel.open failed:", err);
     });
+  });
+} else {
+  // Brak chrome.sidePanel w ogóle (patrz komentarz wyżej) — jedyna opcja to pływające okno.
+  chrome.action.onClicked.addListener(() => {
+    openAsFloatingWindow().catch((err) => console.error("[scraper-ext] openAsFloatingWindow failed:", err));
   });
 }
 

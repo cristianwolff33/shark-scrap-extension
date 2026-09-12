@@ -185,8 +185,29 @@ async function generateAiRowsInBatches(products, batchSize = 8) {
 
 // --- komunikacja z aktywną kartą -------------------------------------------------
 
+// Gdy przeglądarka nie ma chrome.sidePanel (zweryfikowane na żywo: `typeof chrome.sidePanel`
+// bywa dosłownie "undefined" w niektórych wersjach Opery, mimo zapowiadanego wsparcia), ten sam
+// dokument sidepanel.html jest otwierany jako osobne, pływające okno (patrz background.js:
+// openAsFloatingWindow) zamiast dokowanego panelu. W tym trybie "okno, w którym siedzimy" TO
+// WŁASNE, OSOBNE okno wtyczki — zupełnie inne niż okno, w którym user przegląda sklep. Zwykłe
+// `currentWindow: true` (poprawne dla prawdziwego side panelu, który JEST częścią okna sklepu)
+// wskazywałoby więc na złe okno. Zamiast tego śledzimy ostatnie aktywne okno typu "normal"
+// (przeglądarkowe), świadomie pomijając nasze własne okno typu "popup".
+const isFloatingWindowMode = typeof chrome.sidePanel === "undefined";
+
+async function getTrackedWindowId() {
+  if (!isFloatingWindowMode) {
+    const current = await chrome.windows.getCurrent();
+    return current?.id;
+  }
+  const win = await chrome.windows.getLastFocused({ windowTypes: ["normal"] });
+  return win?.id;
+}
+
 async function getActiveTab() {
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  const windowId = await getTrackedWindowId();
+  if (windowId === undefined) return undefined;
+  const [tab] = await chrome.tabs.query({ active: true, windowId });
   return tab;
 }
 
@@ -1497,10 +1518,12 @@ async function init() {
 
   // Panel jest globalny dla okna (patrz applyActiveTab) — dogrywamy się do zmian karty na
   // żywo, żeby user nie musiał zamykać/otwierać wtyczki po każdej nawigacji/przełączeniu karty.
+  // getTrackedWindowId() zamiast chrome.windows.getCurrent() — w trybie pływającego okna (patrz
+  // isFloatingWindowMode) "bieżące okno" to WŁASNE okno wtyczki, nie okno ze sklepem.
   chrome.tabs.onActivated.addListener(async ({ tabId, windowId }) => {
     try {
-      const currentWindow = await chrome.windows.getCurrent();
-      if (currentWindow && currentWindow.id !== windowId) return; // inne okno — nie nasz panel
+      const trackedWindowId = await getTrackedWindowId();
+      if (trackedWindowId !== undefined && trackedWindowId !== windowId) return; // inne okno — nie śledzimy
       const activatedTab = await chrome.tabs.get(tabId);
       await applyActiveTab(activatedTab);
     } catch {
@@ -1511,6 +1534,23 @@ async function init() {
     if (tabId !== state.tabId || !changeInfo.url) return; // changeInfo.url przychodzi TYLKO gdy URL faktycznie się zmienił
     applyActiveTab(updatedTab).catch(() => {});
   });
+  if (isFloatingWindowMode) {
+    // Bez dokowania panel nie "widzi" samego przełączenia fokusu między naszym pływającym oknem
+    // a oknem sklepu (to nie jest zmiana AKTYWNEJ KARTY w oknie sklepu, tylko zmiana AKTYWNEGO
+    // OKNA) — chrome.tabs.onActivated by tego nie złapał, gdyby user po prostu wrócił do już
+    // aktywnej karty sklepu. Dogrywamy się więc dodatkowo na zmianę fokusu okna.
+    chrome.windows.onFocusChanged.addListener(async (windowId) => {
+      if (windowId === chrome.windows.WINDOW_ID_NONE) return; // fokus wyszedł poza przeglądarkę
+      try {
+        const win = await chrome.windows.get(windowId);
+        if (win.type !== "normal") return; // to nasze własne okno-popup — pomijamy
+        const [focusedTab] = await chrome.tabs.query({ active: true, windowId });
+        if (focusedTab) await applyActiveTab(focusedTab);
+      } catch {
+        // okno mogło zniknąć między eventem a odczytem — ignorujemy
+      }
+    });
+  }
 
   state.outputDirHandle = await fsdir.restoreOutputDir();
   updateFolderLabel();

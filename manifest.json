@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Scraper Client — Adapter Configurator (MVP)",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "Konfiguruje scraping danych produktowych (e-commerce) i generuje brief adaptera dla Scraper Client 2.0.",
   "icons": {
     "16": "icons/icon16.png",
